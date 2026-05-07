@@ -1,0 +1,1644 @@
+---
+title: Budget App
+format:
+  html:
+    embed-resources: false
+filters:
+  - shinylive
+---
+
+<style>
+.shinylive-container.viewer {
+  width: calc(100vw - 4rem) !important;
+  height: calc(100vh - 110px) !important;
+  margin: 0 auto !important;
+}
+
+#quarto-content {
+  display: flex;
+  padding: 0 2rem !important;
+}
+</style>
+
+```{shinylive-r}
+#| standalone: true
+#| components: [viewer]
+#| message: false
+#| warning: false
+#| echo: false
+
+library(shiny)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(purrr)
+library(tibble)
+library(DT)
+
+start_default <- floor_date(Sys.Date(), "month")
+end_default <- start_default %m+% years(5) - days(1)
+
+template_values <- list(
+  PhD = c(509928, 539376, 568392),
+  RY = c(144000),
+  Postdoc = c(720000, 744000, 768000)
+)
+
+categories <- c(
+  "Salary, clinician",
+  "Salary for technicians",
+  "Salary Ph.D. students",
+  "Tuition fees for Ph.D. students",
+  "Salary for postdocs",
+  "Salary for research year (RY)",
+  "Salary, employees",
+  "Travel and accommodation",
+  "Travel, extended - applicant",
+  "Conferences",
+  "Publication costs",
+  "Communication and outreach",
+  "Equipment",
+  "Operating expenses",
+  "Consumables",
+  "Bench fee",
+  "Project supplements",
+  "Administrative expenses"
+)
+
+post_templates <- list(
+  "Custom" = list(
+    Category = "Operating expenses",
+    Center = "",
+    Mode = "constant",
+    Unit = "month",
+    ConstantExpr = "0",
+    FunctionExpr = "rep(0, n)",
+    FTE = NA_real_,
+    Note = ""
+  ),
+  "PhD" = list(
+    Category = "Salary Ph.D. students",
+    Center = "",
+    Mode = "variable",
+    Unit = "year",
+    ConstantExpr = "0",
+    FunctionExpr = "rep(0, n)",
+    FTE = 1,
+    Note = "Template values from budget v1",
+    Values = template_values$PhD,
+    DurationYears = 3
+  ),
+  "RY" = list(
+    Category = "Salary for research year (RY)",
+    Center = "",
+    Mode = "variable",
+    Unit = "year",
+    ConstantExpr = "0",
+    FunctionExpr = "rep(10000, n)",
+    FTE = NA_real_,
+    Note = "Template values from budget v1",
+    Values = template_values$RY,
+    DurationYears = 1
+  ),
+  "Postdoc" = list(
+    Category = "Salary for postdocs",
+    Center = "",
+    Mode = "variable",
+    Unit = "year",
+    ConstantExpr = "0",
+    FunctionExpr = "rep(0, n)",
+    FTE = 1,
+    Note = "Template values from budget v1",
+    Values = template_values$Postdoc,
+    DurationYears = 3
+  )
+)
+
+make_empty_posts <- function() {
+  tibble(
+    id = integer(),
+    center = character(),
+    post_name = character(),
+    category = character(),
+    start_date = as.Date(character()),
+    end_date = as.Date(character()),
+    fte = numeric(),
+    value_mode = character(),
+    value_unit = character(),
+    constant_expr = character(),
+    function_expr = character(),
+    value_vector = list(),
+    note = character(),
+    needs_amendment = logical()
+  )
+}
+
+make_empty_salaries <- function() {
+  tibble(
+    id = integer(),
+    identifier = character(),
+    name = character(),
+    unit = character(),
+    base_salary = numeric(),
+    pension_mode = character(),
+    pension_value = numeric(),
+    own_pension_pct = numeric(),
+    base_salary_monthly = numeric(),
+    pension_amount_monthly = numeric(),
+    own_pension_amount_monthly = numeric(),
+    holiday_allowance_total_monthly = numeric(),
+    holiday_allowance_monthly = numeric(),
+    total_salary_monthly = numeric(),
+    total_salary_holidays_deducted_monthly = numeric(),
+    base_salary_yearly = numeric(),
+    pension_amount_yearly = numeric(),
+    own_pension_amount_yearly = numeric(),
+    holiday_allowance_total_yearly = numeric(),
+    holiday_allowance_yearly = numeric(),
+    total_salary_yearly = numeric(),
+    total_salary_holidays_deducted_yearly = numeric()
+  )
+}
+
+calc_salary_fields <- function(base_salary, unit, pension_mode, pension_value, own_pension_pct) {
+  base_input <- as.numeric(base_salary)
+  own_pct <- as.numeric(own_pension_pct)
+  if (is.na(base_input) || base_input < 0) stop("Base salary must be a non-negative number.", call. = FALSE)
+  if (is.na(own_pct) || own_pct < 0) stop("Own part of pension (%) must be a non-negative number.", call. = FALSE)
+
+  base_monthly <- if (identical(unit, "year")) base_input / 12 else base_input
+
+  pension_amount_monthly <- if (identical(pension_mode, "percentage")) {
+    base_monthly * as.numeric(pension_value) / 100
+  } else {
+    raw_pension <- as.numeric(pension_value)
+    if (identical(unit, "year")) raw_pension / 12 else raw_pension
+  }
+  if (is.na(pension_amount_monthly) || pension_amount_monthly < 0) {
+    stop("Pension must be a non-negative number.", call. = FALSE)
+  }
+
+  own_pension_amount_monthly <- pension_amount_monthly * own_pct / 100
+  holiday_allowance_total_monthly <- base_monthly + own_pension_amount_monthly
+  holiday_allowance_monthly <- holiday_allowance_total_monthly / 8
+  total_salary_monthly <- base_monthly + pension_amount_monthly + holiday_allowance_monthly
+  total_salary_holidays_deducted_monthly <- total_salary_monthly * 47 / 52
+
+  list(
+    base_salary_monthly = base_monthly,
+    pension_amount_monthly = pension_amount_monthly,
+    own_pension_amount_monthly = own_pension_amount_monthly,
+    holiday_allowance_total_monthly = holiday_allowance_total_monthly,
+    holiday_allowance_monthly = holiday_allowance_monthly,
+    total_salary_monthly = total_salary_monthly,
+    total_salary_holidays_deducted_monthly = total_salary_holidays_deducted_monthly,
+    base_salary_yearly = base_monthly * 12,
+    pension_amount_yearly = pension_amount_monthly * 12,
+    own_pension_amount_yearly = own_pension_amount_monthly * 12,
+    holiday_allowance_total_yearly = holiday_allowance_total_monthly * 12,
+    holiday_allowance_yearly = holiday_allowance_monthly * 12,
+    total_salary_yearly = total_salary_monthly * 12,
+    total_salary_holidays_deducted_yearly = total_salary_holidays_deducted_monthly * 12
+  )
+}
+
+month_sequence <- function(start_date, end_date) {
+  seq(floor_date(start_date, "month"), floor_date(end_date, "month"), by = "1 month")
+}
+
+n_months_between <- function(start_date, end_date) {
+  length(month_sequence(start_date, end_date))
+}
+
+n_years_between <- function(start_date, end_date) {
+  ceiling(n_months_between(start_date, end_date) / 12)
+}
+
+safe_eval_expr <- function(expr_text, fte = NA_real_, n = 1L, extra_env = list()) {
+  if (is.null(expr_text) || !nzchar(trimws(expr_text))) {
+    stop("Expression cannot be empty.", call. = FALSE)
+  }
+
+  env <- new.env(parent = baseenv())
+  env$FTE <- fte
+  env$n <- n
+  if (length(extra_env) > 0) {
+    list2env(extra_env, envir = env)
+  }
+
+  value <- eval(parse(text = expr_text), envir = env)
+  value
+}
+
+make_salary_lookup <- function(salaries_tbl) {
+  if (!nrow(salaries_tbl)) {
+    return(data.frame())
+  }
+
+  out <- salaries_tbl %>%
+    transmute(
+      identifier = identifier,
+      base = base_salary_monthly,
+      pension = pension_amount_monthly,
+      own_pension = own_pension_amount_monthly,
+      holiday_base = holiday_allowance_total_monthly,
+      holiday = holiday_allowance_monthly,
+      total_m = total_salary_monthly,
+      total_y = total_salary_yearly,
+      total_deducted_m = total_salary_holidays_deducted_monthly,
+      total_deducted_y = total_salary_holidays_deducted_yearly
+    ) %>%
+    as.data.frame(stringsAsFactors = FALSE)
+
+  rownames(out) <- out$identifier
+  out$identifier <- NULL
+  out
+}
+
+expand_year_values <- function(values, n_months) {
+  rep(values / 12, each = 12)[seq_len(n_months)]
+}
+
+resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflation_pct = 0, fte_monthly_total = NULL) {
+  months <- month_sequence(post_row$start_date, post_row$end_date)
+  n_months <- length(months)
+  n_years <- ceiling(n_months / 12)
+
+  mode <- post_row$value_mode
+  unit <- post_row$value_unit
+  fte <- post_row$fte
+  inflation_rate <- as.numeric(inflation_pct) / 100
+  if (is.na(inflation_rate)) inflation_rate <- 0
+  base_calendar_year <- year(months[1])
+  inflation_month_factors <- (1 + inflation_rate)^(year(months) - base_calendar_year)
+  inflation_year_factors <- (1 + inflation_rate)^(seq_len(n_years) - 1)
+  if (is.null(fte_monthly_total)) {
+    fte_monthly_total <- rep(NA_real_, n_months)
+  } else {
+    fte_monthly_total <- rep(as.numeric(fte_monthly_total), length.out = n_months)
+  }
+
+  salary_ids <- rownames(salaries_lookup)
+  extra_env <- list(
+    salaries = salaries_lookup,
+    inflation_pct = as.numeric(inflation_pct),
+    months = months,
+    fte_monthly_total = fte_monthly_total,
+    fte_monthly_sum = sum(fte_monthly_total, na.rm = TRUE),
+    inflation_month_factors = inflation_month_factors,
+    inflation_year_factors = inflation_year_factors,
+    apply_inflation_month = function(base_value) {
+      x2 <- rep(as.numeric(base_value), length.out = n_months)
+      x2 * inflation_month_factors
+    },
+    apply_inflation_year = function(base_value) {
+      x2 <- rep(as.numeric(base_value), length.out = n_years)
+      x2 * inflation_year_factors
+    }
+  )
+  if (length(salary_ids) > 0) {
+    for (sid in salary_ids) {
+      extra_env[[sid]] <- sid
+    }
+  }
+
+  if (mode == "constant") {
+    scalar <- safe_eval_expr(post_row$constant_expr, fte = fte, n = n_months, extra_env = extra_env)
+    if (length(scalar) != 1L || !is.numeric(scalar) || is.na(scalar)) {
+      stop("Constant amount expression must resolve to one numeric value.", call. = FALSE)
+    }
+    values <- rep(as.numeric(scalar), if (unit == "month") n_months else n_years)
+  } else if (mode == "function") {
+    values <- safe_eval_expr(post_row$function_expr, fte = fte, n = n_months, extra_env = extra_env)
+    if (!is.numeric(values)) {
+      stop("Amount formula must resolve to numeric values.", call. = FALSE)
+    }
+  } else {
+    values <- unlist(post_row$value_vector, use.names = FALSE)
+    if (!is.numeric(values)) {
+      stop("Variable amounts must be numeric.", call. = FALSE)
+    }
+  }
+
+  if (unit == "year") {
+    if (length(values) == 1L) {
+      values <- rep(values, n_years)
+    }
+    if (length(values) != n_years) {
+      stop(
+        "Year-based values must have length 1 or match required years (",
+        n_years,
+        ").",
+        call. = FALSE
+      )
+    }
+    values <- expand_year_values(values, n_months)
+  } else {
+    if (length(values) == 1L) {
+      values <- rep(values, n_months)
+    }
+    if (length(values) != n_months) {
+      stop(
+        "Month-based values must have length 1 or match required months (",
+        n_months,
+        ").",
+        call. = FALSE
+      )
+    }
+  }
+
+  if (any(is.na(values))) {
+    stop("Resolved amounts contain missing values.", call. = FALSE)
+  }
+
+  tibble(
+    month = months,
+    value = as.numeric(values)
+  )
+}
+
+flag_posts <- function(posts_tbl, budget_start, budget_end) {
+  posts_tbl %>%
+    mutate(needs_amendment = start_date < budget_start | end_date > budget_end)
+}
+
+build_long_budget <- function(posts_tbl, budget_start, budget_end, salaries_lookup = data.frame(), inflation_pct = 0) {
+  if (!nrow(posts_tbl)) {
+    return(tibble())
+  }
+
+  month_fte_total_for <- function(months) {
+    map_dbl(months, function(m) {
+      sum(posts_tbl$fte[posts_tbl$start_date <= m & posts_tbl$end_date >= m], na.rm = TRUE)
+    })
+  }
+
+  map_dfr(seq_len(nrow(posts_tbl)), function(i) {
+    row <- posts_tbl[i, ]
+    row_months <- month_sequence(row$start_date, row$end_date)
+    row_fte_monthly_total <- month_fte_total_for(row_months)
+
+    resolved <- tryCatch(
+      resolve_post_values(
+        row,
+        salaries_lookup = salaries_lookup,
+        inflation_pct = inflation_pct,
+        fte_monthly_total = row_fte_monthly_total
+      ),
+      error = function(e) NULL
+    )
+
+    if (is.null(resolved)) {
+      return(tibble())
+    }
+
+    resolved %>%
+      mutate(
+        id = row$id,
+        center = row$center,
+        post_name = row$post_name,
+        category = row$category,
+        fte = row$fte
+      ) %>%
+      filter(month >= budget_start, month <= budget_end) %>%
+      mutate(
+        calendar_year = year(month),
+        project_year = interval(budget_start, month) %/% months(12) + 1L,
+        period_month = format(month, "%Y-%m")
+      )
+  })
+}
+
+post_total <- function(post_row, all_posts_tbl = post_row, salaries_lookup = data.frame(), inflation_pct = 0) {
+  row_months <- month_sequence(post_row$start_date, post_row$end_date)
+  row_fte_monthly_total <- map_dbl(row_months, function(m) {
+    sum(all_posts_tbl$fte[all_posts_tbl$start_date <= m & all_posts_tbl$end_date >= m], na.rm = TRUE)
+  })
+
+  resolved <- resolve_post_values(
+    post_row,
+    salaries_lookup = salaries_lookup,
+    inflation_pct = inflation_pct,
+    fte_monthly_total = row_fte_monthly_total
+  )
+  sum(resolved$value)
+}
+
+serialize_posts <- function(posts_tbl) {
+  posts_tbl %>%
+    mutate(
+      start_date = as.character(start_date),
+      end_date = as.character(end_date),
+      value_vector = map_chr(value_vector, ~ paste(.x, collapse = ";"))
+    )
+}
+
+parse_posts <- function(posts_tbl) {
+  required <- c(
+    "id", "center", "post_name", "category", "start_date", "end_date",
+    "fte", "value_mode", "value_unit", "constant_expr", "function_expr",
+    "value_vector", "note", "needs_amendment"
+  )
+
+  if (!all(required %in% names(posts_tbl))) {
+    stop("Imported posts sheet is missing required columns.", call. = FALSE)
+  }
+
+  posts_tbl %>%
+    mutate(
+      start_date = as.Date(start_date),
+      end_date = as.Date(end_date),
+      fte = as.numeric(fte),
+      id = as.integer(id),
+      needs_amendment = as.logical(needs_amendment),
+      value_vector = strsplit(ifelse(is.na(value_vector), "", value_vector), ";", fixed = TRUE),
+      value_vector = map(value_vector, ~ as.numeric(.x[nzchar(.x)]))
+    )
+}
+
+serialize_salaries <- function(salaries_tbl) {
+  salaries_tbl
+}
+
+parse_salaries <- function(salaries_tbl) {
+  required <- c(
+    "id", "identifier", "name", "unit", "base_salary", "pension_mode", "pension_value",
+    "own_pension_pct", "base_salary_monthly", "pension_amount_monthly", "own_pension_amount_monthly", "holiday_allowance_total_monthly",
+    "holiday_allowance_monthly", "total_salary_monthly", "total_salary_holidays_deducted_monthly",
+    "base_salary_yearly", "pension_amount_yearly", "own_pension_amount_yearly", "holiday_allowance_total_yearly",
+    "holiday_allowance_yearly", "total_salary_yearly", "total_salary_holidays_deducted_yearly"
+  )
+  if (!all(required %in% names(salaries_tbl))) {
+    stop("Imported salaries sheet is missing required columns.", call. = FALSE)
+  }
+
+  salaries_tbl %>%
+    mutate(
+      id = as.integer(id),
+      base_salary = as.numeric(base_salary),
+      pension_value = as.numeric(pension_value),
+      own_pension_pct = as.numeric(own_pension_pct),
+      base_salary_monthly = as.numeric(base_salary_monthly),
+      pension_amount_monthly = as.numeric(pension_amount_monthly),
+      own_pension_amount_monthly = as.numeric(own_pension_amount_monthly),
+      holiday_allowance_total_monthly = as.numeric(holiday_allowance_total_monthly),
+      holiday_allowance_monthly = as.numeric(holiday_allowance_monthly),
+      total_salary_monthly = as.numeric(total_salary_monthly),
+      total_salary_holidays_deducted_monthly = as.numeric(total_salary_holidays_deducted_monthly),
+      base_salary_yearly = as.numeric(base_salary_yearly),
+      pension_amount_yearly = as.numeric(pension_amount_yearly),
+      own_pension_amount_yearly = as.numeric(own_pension_amount_yearly),
+      holiday_allowance_total_yearly = as.numeric(holiday_allowance_total_yearly),
+      holiday_allowance_yearly = as.numeric(holiday_allowance_yearly),
+      total_salary_yearly = as.numeric(total_salary_yearly),
+      total_salary_holidays_deducted_yearly = as.numeric(total_salary_holidays_deducted_yearly)
+    )
+}
+
+append_total_row <- function(df, amount_col = "amount") {
+  if (!nrow(df)) {
+    return(df)
+  }
+
+  total_row <- df[1, , drop = FALSE]
+  total_row[1, ] <- NA
+  if ("period" %in% names(total_row)) total_row$period <- "TOTAL"
+
+  for (nm in names(total_row)) {
+    if (is.character(total_row[[nm]]) && nm != "period") {
+      total_row[[nm]] <- "All"
+    }
+  }
+
+  total_row[[amount_col]] <- sum(df[[amount_col]], na.rm = TRUE)
+  bind_rows(df, total_row)
+}
+
+ui <- fluidPage(
+  tags$head(tags$style(HTML(
+    "
+    .container-fluid, .form-control, .btn, .control-label, .selectize-input, .shiny-input-container {
+      font-size: 15px !important;
+    }
+    .btn {
+      padding: 0.8rem 1.2rem !important;
+    }
+    .inline-error {
+      color: #b00020;
+      font-weight: 700;
+      margin: 6px 0;
+    }
+    .dataTables_wrapper .dataTables_filter {
+      display: none;
+    }
+    table.dataTable td, table.dataTable th {
+      font-size: 12px !important;
+    }
+
+    h4 {
+      font-size: 20px;
+      text-align: center;
+      padding: 10px 0 10px;
+      font-weight: 500;
+      text-decoration-line: underline;
+    }
+    "
+  ))),
+  tags$head(tags$script(src = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js")),
+  tags$head(tags$script(HTML(
+    "
+    Shiny.addCustomMessageHandler('download-xlsx', function(payload) {
+      if (typeof XLSX === 'undefined') {
+        console.error('SheetJS (XLSX) failed to load.');
+        return;
+      }
+
+      var wb = XLSX.utils.book_new();
+      Object.keys(payload.sheets).forEach(function(sheetName) {
+        var rows = payload.sheets[sheetName] || [];
+        var ws = XLSX.utils.json_to_sheet(rows);
+        XLSX.utils.book_append_sheet(wb, ws, sheetName);
+      });
+
+      XLSX.writeFile(wb, payload.filename || 'Budget.xlsx');
+    });
+    "
+  ))),
+  titlePanel("Budget builder"),
+  sidebarLayout(
+    sidebarPanel(
+      h4("Continue from existing budget (optional)"),
+      tags$p("Import a previously exported budget workbook to continue where you left off."),
+      fileInput("import_file", "Import Budget workbook (.xlsx)", accept = ".xlsx"),
+      hr(),
+      h4("1) Budget period"),
+      dateInput("budget_start", "Budget start", value = start_default),
+      dateInput("budget_end", "Budget end", value = end_default),
+      numericInput("inflation_pct", "Yearly salary inflation (%)", value = 0, min = 0, step = 0.1),
+      uiOutput("budget_period_error"),
+      hr(),
+      h4("2) Add or edit post"),
+      selectInput("template_name", "Template", choices = names(post_templates), selected = "Custom"),
+      actionButton("apply_template", "Apply template"),
+      textInput("post_name", "Post name"),
+      textInput("center", "Center", value = ""),
+      selectInput("category", "Category", choices = c("", categories), selected = ""),
+      dateInput("post_start", "Post start"),
+      dateInput("post_end", "Post end"),
+      numericInput("fte", "FTE", value = NA_real_, min = 0, step = 0.1),
+      selectInput("value_mode", "How should amount be defined?", choices = c("constant", "function", "variable"), selected = "constant"),
+      selectInput("value_unit", "Amount frequency", choices = c("month", "year"), selected = "month"),
+      uiOutput("value_inputs_ui"),
+      textAreaInput("note", "Note", value = "", rows = 2),
+      tags$div(style = "font-size:0.8em;color:#b00020;margin-top:-4px;", "* = required"),
+      fluidRow(
+        column(12, actionButton("add_or_update", "Add / Update", class = "btn-primary"))
+      ),
+      uiOutput("form_error"),
+      uiOutput("success_feedback"),
+      br(),
+      actionButton("edit_selected", "Edit selected post"),
+      actionButton("delete_selected", "Delete selected post", class = "btn-danger"),
+      hr(),
+      br(),
+      uiOutput("export_control"),
+      uiOutput("export_error")
+    ),
+    mainPanel(
+      tabsetPanel(
+        tabPanel(
+          "Post search and overview",
+          fluidRow(
+            column(
+              4,
+              selectInput(
+                "period_format",
+                "Display by time periods:",
+                choices = c("Month" = "month", "Calendar year" = "calendar_year", "Project year" = "project_year"),
+                selected = "project_year"
+              )
+            ),
+            column(
+              8,
+              checkboxGroupInput(
+                "squash_dims",
+                "Squash by:",
+                choices = c("Period", "Post name", "Center", "Category"),
+                selected = character(0),
+                inline = TRUE
+              )
+            )
+          ),
+          h4("Filter by:"),
+          fluidRow(
+            column(3, selectizeInput("filter_name", "Post name", choices = character(0), multiple = TRUE)),
+            column(3, selectizeInput("filter_center", "Center", choices = character(0), multiple = TRUE)),
+            column(3, selectizeInput("filter_category", "Category", choices = character(0), multiple = TRUE)),
+            column(3, dateRangeInput("filter_month_range", "Active month range (inclusive)", start = start_default, end = end_default, format = "yyyy-mm"))
+          ),
+          fluidRow(
+            column(3, numericInput("filter_amount_min", "Min amount", value = 0)),
+            column(3, numericInput("filter_amount_max", "Max amount", value = 10000000)),
+            column(6, textInput("filter_text", "Free-text search", value = "", placeholder = "Search in period, post name, center, category"))
+          ),
+          DTOutput("posts_table"),
+          br(),
+          htmlOutput("amendment_status")
+        ),
+        tabPanel(
+          "Salary calculations",
+          fluidRow(
+            column(4, textInput("salary_name", "Name of salary calculation")),
+            column(2, selectInput("salary_unit", "Monthly or yearly", choices = c("month", "year"), selected = "year")),
+            column(3, numericInput("salary_base", "Base salary", value = 0, min = 0, step = 100)),
+            column(3, selectInput("salary_pension_mode", "Pension mode", choices = c("percentage", "numeric"), selected = "percentage"))
+          ),
+          fluidRow(
+            column(3, numericInput("salary_pension_value", "Pension (% or amount)", value = 19.36, min = 0, step = 0.1)),
+            column(3, numericInput("salary_own_pension_pct", "Own part of pension (%)", value = 33.3, min = 0, step = 0.1)),
+            column(3, textOutput("salary_holiday_base")),
+            column(3, textOutput("salary_holiday_allowance"))
+          ),
+          fluidRow(
+            column(3, textOutput("salary_total")),
+            column(3, textOutput("salary_total_deducted")),
+            column(6, uiOutput("salary_error"))
+          ),
+          fluidRow(
+            column(12, actionButton("salary_add_or_update", "Add / Update salary", class = "btn-primary", style = "width: 100%; padding: 12px 0; margin: 12px 0;"))
+          ),
+          tags$hr(),
+          br(),
+          DTOutput("salary_table"),
+          br(),
+          fluidRow(
+            column(6, actionButton("salary_edit_selected", "Edit selected salary", style = "width: 100%; padding: 10px 0;")),
+            column(6, actionButton("salary_delete_selected", "Delete selected salary", class = "btn-danger", style = "width: 100%; padding: 10px 0;"))
+          ),
+          br(),
+          textOutput("salary_identifier_help")
+        )
+      )
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  rv <- reactiveValues(
+    posts = make_empty_posts(),
+    salaries = make_empty_salaries(),
+    next_id = 1L,
+    next_salary_id = 1L,
+    editing_id = NA_integer_,
+    editing_salary_id = NA_integer_,
+    variable_defaults = numeric(),
+    constant_expr_draft = "0",
+    function_expr_draft = "rep((510000*FTE)/12, n)",
+    form_error_text = NULL,
+    salary_error_text = NULL,
+    budget_error_text = NULL,
+    export_error_text = NULL,
+    success_text = NULL,
+    success_at = NULL
+  )
+
+  show_error_modal <- function(msg) {
+    showModal(modalDialog(
+      title = "Error",
+      msg,
+      easyClose = FALSE,
+      footer = modalButton("Dismiss")
+    ))
+  }
+
+  set_success <- function(msg) {
+    rv$success_text <- msg
+    rv$success_at <- Sys.time()
+  }
+
+  reset_form <- function() {
+    rv$editing_id <- NA_integer_
+    rv$variable_defaults <- numeric()
+    rv$constant_expr_draft <- "0"
+    rv$function_expr_draft <- "rep((510000*FTE)/12, n)"
+    updateTextInput(session, "post_name", value = "")
+    updateTextInput(session, "center", value = "")
+    updateSelectInput(session, "category", selected = "")
+    updateDateInput(session, "post_start", value = input$budget_start)
+    updateDateInput(session, "post_end", value = input$budget_end)
+    updateNumericInput(session, "fte", value = NA_real_)
+    updateSelectInput(session, "value_mode", selected = "constant")
+    updateSelectInput(session, "value_unit", selected = "month")
+    updateTextInput(session, "constant_expr", value = "0")
+    updateTextInput(session, "function_expr", value = "rep((510000*FTE)/12, n)")
+    updateTextAreaInput(session, "note", value = "")
+  }
+
+  output$budget_period_error <- renderUI({
+    if (is.null(rv$budget_error_text)) return(NULL)
+    tags$div(class = "inline-error", rv$budget_error_text)
+  })
+
+  output$form_error <- renderUI({
+    if (is.null(rv$form_error_text)) return(NULL)
+    tags$div(class = "inline-error", rv$form_error_text)
+  })
+
+  output$export_error <- renderUI({
+    if (is.null(rv$export_error_text)) return(NULL)
+    tags$div(class = "inline-error", rv$export_error_text)
+  })
+
+  output$salary_error <- renderUI({
+    if (is.null(rv$salary_error_text)) return(NULL)
+    tags$div(class = "inline-error", rv$salary_error_text)
+  })
+
+  salary_calc_preview <- reactive({
+    tryCatch(
+      calc_salary_fields(
+        base_salary = input$salary_base,
+        unit = input$salary_unit,
+        pension_mode = input$salary_pension_mode,
+        pension_value = input$salary_pension_value,
+        own_pension_pct = input$salary_own_pension_pct
+      ),
+      error = function(e) NULL
+    )
+  })
+
+  output$salary_holiday_base <- renderText({
+    calc <- salary_calc_preview()
+    if (is.null(calc)) return("Holiday allowance total: -")
+    unit <- input$salary_unit
+    val <- if (identical(unit, "year")) calc$holiday_allowance_total_yearly else calc$holiday_allowance_total_monthly
+    suffix <- if (identical(unit, "year")) " (yearly)" else " (monthly)"
+    paste0("Holiday allowance total", suffix, ": ", format(round(val, 2), nsmall = 2))
+  })
+
+  output$salary_holiday_allowance <- renderText({
+    calc <- salary_calc_preview()
+    if (is.null(calc)) return("Holiday allowance: -")
+    unit <- input$salary_unit
+    val <- if (identical(unit, "year")) calc$holiday_allowance_yearly else calc$holiday_allowance_monthly
+    suffix <- if (identical(unit, "year")) " (yearly)" else " (monthly)"
+    paste0("Holiday allowance", suffix, ": ", format(round(val, 2), nsmall = 2))
+  })
+
+  output$salary_total <- renderText({
+    calc <- salary_calc_preview()
+    if (is.null(calc)) return("Total salary: -")
+    unit <- input$salary_unit
+    val <- if (identical(unit, "year")) calc$total_salary_yearly else calc$total_salary_monthly
+    suffix <- if (identical(unit, "year")) " (yearly)" else " (monthly)"
+    paste0("Total salary", suffix, ": ", format(round(val, 2), nsmall = 2))
+  })
+
+  output$salary_total_deducted <- renderText({
+    calc <- salary_calc_preview()
+    if (is.null(calc)) return("Total salary, holidays deducted: -")
+    unit <- input$salary_unit
+    val <- if (identical(unit, "year")) calc$total_salary_holidays_deducted_yearly else calc$total_salary_holidays_deducted_monthly
+    suffix <- if (identical(unit, "year")) " (yearly)" else " (monthly)"
+    paste0("Total salary, holidays deducted", suffix, ": ", format(round(val, 2), nsmall = 2))
+  })
+
+  output$salary_table <- renderDT({
+    datatable(
+      rv$salaries %>%
+        select(
+          identifier, name,
+          base_salary_monthly,
+          pension_amount_monthly,
+          own_pension_amount_monthly,
+          holiday_allowance_total_monthly,
+          holiday_allowance_monthly,
+          total_salary_monthly, total_salary_yearly,
+          total_salary_holidays_deducted_monthly, total_salary_holidays_deducted_yearly
+        ),
+      colnames = c(
+        "ID", "Name",
+        "Base (base)",
+        "Pension (pension)",
+        "Own pens (own_pension)",
+        "Hol base (holiday_base)",
+        "Holiday (holiday)",
+        "Total (total_m)", "Total (total_y)",
+        "Total % holiday (total_deducted_m)", "Total % holiday (total_deducted_y)"
+      ),
+      selection = "single",
+      rownames = FALSE,
+      options = list(pageLength = 10, scrollX = TRUE)
+    ) %>%
+      formatRound(
+        columns = c(
+          "base_salary_monthly",
+          "pension_amount_monthly",
+          "own_pension_amount_monthly",
+          "holiday_allowance_total_monthly",
+          "holiday_allowance_monthly",
+          "total_salary_monthly", "total_salary_yearly",
+          "total_salary_holidays_deducted_monthly", "total_salary_holidays_deducted_yearly"
+        ),
+        digits = 2
+      )
+  })
+
+  output$salary_identifier_help <- renderText({
+    if (!nrow(rv$salaries)) {
+      return("Formula helper: after you add salaries, reference them like salaries[s1, \"total_m\"] (monthly) or salaries[s1, \"total_y\"] (yearly).")
+    }
+    ids <- paste(rv$salaries$identifier, collapse = ", ")
+    paste0("Formula helper: identifiers are ", ids, ". Example: apply_inflation_month(salaries[s1, \"total_m\"])")
+  })
+
+  selected_salary_id <- reactive({
+    sel <- input$salary_table_rows_selected
+    if (!length(sel) || !nrow(rv$salaries)) return(NA_integer_)
+    rv$salaries$id[sel]
+  })
+
+  observeEvent(input$salary_add_or_update, {
+    rv$salary_error_text <- NULL
+
+    if (is.null(input$salary_name) || !nzchar(trimws(input$salary_name))) {
+      rv$salary_error_text <- "Salary calculation name is required."
+      return()
+    }
+
+    calc <- tryCatch(
+      calc_salary_fields(
+        base_salary = input$salary_base,
+        unit = input$salary_unit,
+        pension_mode = input$salary_pension_mode,
+        pension_value = input$salary_pension_value,
+        own_pension_pct = input$salary_own_pension_pct
+      ),
+      error = function(e) {
+        rv$salary_error_text <- e$message
+        NULL
+      }
+    )
+    if (is.null(calc)) return()
+
+    is_new <- is.na(rv$editing_salary_id)
+    sid <- if (is_new) rv$next_salary_id else rv$editing_salary_id
+    identifier <- if (is_new) paste0("s", rv$next_salary_id) else (rv$salaries %>% filter(id == sid) %>% pull(identifier) %>% .[1])
+
+    row <- tibble(
+      id = sid,
+      identifier = identifier,
+      name = input$salary_name,
+      unit = input$salary_unit,
+      base_salary = as.numeric(input$salary_base),
+      pension_mode = input$salary_pension_mode,
+      pension_value = as.numeric(input$salary_pension_value),
+      own_pension_pct = as.numeric(input$salary_own_pension_pct),
+      base_salary_monthly = calc$base_salary_monthly,
+      pension_amount_monthly = calc$pension_amount_monthly,
+      own_pension_amount_monthly = calc$own_pension_amount_monthly,
+      holiday_allowance_total_monthly = calc$holiday_allowance_total_monthly,
+      holiday_allowance_monthly = calc$holiday_allowance_monthly,
+      total_salary_monthly = calc$total_salary_monthly,
+      total_salary_holidays_deducted_monthly = calc$total_salary_holidays_deducted_monthly,
+      base_salary_yearly = calc$base_salary_yearly,
+      pension_amount_yearly = calc$pension_amount_yearly,
+      own_pension_amount_yearly = calc$own_pension_amount_yearly,
+      holiday_allowance_total_yearly = calc$holiday_allowance_total_yearly,
+      holiday_allowance_yearly = calc$holiday_allowance_yearly,
+      total_salary_yearly = calc$total_salary_yearly,
+      total_salary_holidays_deducted_yearly = calc$total_salary_holidays_deducted_yearly
+    )
+
+    if (is_new) {
+      rv$salaries <- bind_rows(rv$salaries, row)
+      rv$next_salary_id <- rv$next_salary_id + 1L
+      set_success(paste("Salary calculation added:", row$name))
+    } else {
+      rv$salaries <- rv$salaries %>% filter(id != sid) %>% bind_rows(row)
+      rv$editing_salary_id <- NA_integer_
+      set_success(paste("Salary calculation updated:", row$name))
+    }
+  })
+
+  observeEvent(input$salary_edit_selected, {
+    sid <- selected_salary_id()
+    req(!is.na(sid))
+    row <- rv$salaries %>% filter(id == sid)
+    req(nrow(row) == 1)
+
+    rv$editing_salary_id <- sid
+    updateTextInput(session, "salary_name", value = row$name)
+    updateSelectInput(session, "salary_unit", selected = row$unit)
+    updateNumericInput(session, "salary_base", value = row$base_salary)
+    updateSelectInput(session, "salary_pension_mode", selected = row$pension_mode)
+    updateNumericInput(session, "salary_pension_value", value = row$pension_value)
+    updateNumericInput(session, "salary_own_pension_pct", value = row$own_pension_pct)
+    set_success("Salary calculation loaded for editing.")
+  })
+
+  observeEvent(input$salary_delete_selected, {
+    sid <- selected_salary_id()
+    req(!is.na(sid))
+    rv$salaries <- rv$salaries %>% filter(id != sid)
+    if (!is.na(rv$editing_salary_id) && rv$editing_salary_id == sid) {
+      rv$editing_salary_id <- NA_integer_
+    }
+    set_success("Salary calculation deleted.")
+  })
+
+  output$success_feedback <- renderUI({
+    if (is.null(rv$success_text) || is.null(rv$success_at)) return(NULL)
+    invalidateLater(250, session)
+    if (as.numeric(difftime(Sys.time(), rv$success_at, units = "secs")) > 4) {
+      rv$success_text <- NULL
+      rv$success_at <- NULL
+      return(NULL)
+    }
+    tags$div(
+      style = "background:#e7f8ec;border:1px solid #95d5a6;color:#1d6f33;padding:10px;border-radius:6px;margin:8px 0;font-weight:600;",
+      rv$success_text
+    )
+  })
+
+  observeEvent(TRUE, {
+    updateDateInput(session, "post_start", value = input$budget_start)
+    updateDateInput(session, "post_end", value = input$budget_end)
+  }, once = TRUE)
+
+  observeEvent(c(input$budget_start, input$budget_end), {
+    req(input$budget_start, input$budget_end)
+
+    if (input$budget_end < input$budget_start) {
+      rv$budget_error_text <- "Budget end must be on or after budget start."
+      return()
+    }
+
+    rv$budget_error_text <- NULL
+    rv$export_error_text <- NULL
+    updateDateRangeInput(session, "filter_month_range", start = input$budget_start, end = input$budget_end)
+
+    rv$posts <- flag_posts(rv$posts, input$budget_start, input$budget_end)
+  }, ignoreInit = FALSE)
+
+  observeEvent(input$apply_template, {
+    tpl <- post_templates[[input$template_name]]
+    req(!is.null(tpl))
+
+    rv$constant_expr_draft <- tpl$ConstantExpr
+    rv$function_expr_draft <- tpl$FunctionExpr
+
+    updateTextInput(session, "center", value = tpl$Center)
+    updateSelectInput(session, "category", selected = tpl$Category)
+    updateSelectInput(session, "value_mode", selected = tpl$Mode)
+    updateSelectInput(session, "value_unit", selected = tpl$Unit)
+    updateTextInput(session, "constant_expr", value = tpl$ConstantExpr)
+    updateTextInput(session, "function_expr", value = tpl$FunctionExpr)
+    updateNumericInput(session, "fte", value = tpl$FTE)
+    updateTextAreaInput(session, "note", value = tpl$Note)
+
+    if (!is.null(tpl$DurationYears)) {
+      updateDateInput(session, "post_start", value = input$budget_start)
+      updateDateInput(
+        session,
+        "post_end",
+        value = input$budget_start %m+% years(tpl$DurationYears) - days(1)
+      )
+    } else {
+      updateDateInput(session, "post_start", value = input$budget_start)
+      updateDateInput(session, "post_end", value = input$budget_end)
+    }
+
+    if (!is.null(tpl$Values)) {
+      rv$variable_defaults <- tpl$Values
+    } else {
+      rv$variable_defaults <- numeric()
+    }
+
+    set_success(paste("Template applied:", input$template_name))
+  })
+
+  required_value_count <- reactive({
+    req(input$post_start, input$post_end)
+    if (input$post_end < input$post_start) return(0L)
+    if (input$value_unit == "year") {
+      n_years_between(input$post_start, input$post_end)
+    } else {
+      n_months_between(input$post_start, input$post_end)
+    }
+  })
+
+  output$value_inputs_ui <- renderUI({
+    mode <- input$value_mode
+
+    if (mode == "constant") {
+      tagList(
+        textInput("constant_expr", "Constant amount expression", value = rv$constant_expr_draft, placeholder = "Example: 510000*FTE")
+      )
+    } else if (mode == "function") {
+      tagList(
+        textInput("function_expr", "Amount formula expression", value = rv$function_expr_draft, placeholder = "Expression using n, FTE, salaries[...] and inflation helpers"),
+        actionButton("show_formula_help", "Help: available formula variables")
+      )
+    } else {
+      n_vals <- required_value_count()
+      defaults <- rv$variable_defaults
+      if (length(defaults) < n_vals) defaults <- c(defaults, rep(0, n_vals - length(defaults)))
+
+      tagList(
+        helpText(paste("Provide", n_vals, ifelse(input$value_unit == "year", "yearly", "monthly"), "amounts.")),
+        lapply(seq_len(n_vals), function(i) {
+          unit_label <- ifelse(input$value_unit == "year", "Year", "Month")
+          numericInput(
+            inputId = paste0("var_value_", i),
+            label = paste(unit_label, i),
+            value = defaults[i],
+            step = 100
+          )
+        })
+      )
+    }
+  })
+
+  post_summary <- reactive({
+    if (!nrow(rv$posts)) return(tibble())
+
+    salaries_lookup <- make_salary_lookup(rv$salaries)
+
+    map_dfr(seq_len(nrow(rv$posts)), function(i) {
+      row <- rv$posts[i, ]
+      total <- tryCatch(post_total(row, all_posts_tbl = rv$posts, salaries_lookup = salaries_lookup, inflation_pct = input$inflation_pct), error = function(e) NA_real_)
+      tibble(
+        id = row$id,
+        center = row$center,
+        post_name = row$post_name,
+        category = row$category,
+        start_date = row$start_date,
+        end_date = row$end_date,
+        fte = row$fte,
+        value_mode = row$value_mode,
+        value_unit = row$value_unit,
+        total_value = total,
+        needs_amendment = row$needs_amendment
+      )
+    })
+  })
+
+  observe({
+    s <- post_summary()
+    updateSelectizeInput(session, "filter_name", choices = sort(unique(s$post_name)), selected = character(0), server = TRUE)
+    updateSelectizeInput(session, "filter_center", choices = sort(unique(s$center)), selected = character(0), server = TRUE)
+    updateSelectizeInput(session, "filter_category", choices = sort(unique(s$category)), selected = character(0), server = TRUE)
+  })
+
+  filtered_posts <- reactive({
+    build_display_table <- function(period_choice, apply_filters = TRUE) {
+      if (!nrow(rv$posts)) {
+        return(tibble(
+          id = integer(),
+          Period = character(),
+          `Post name` = character(),
+          Center = character(),
+          Category = character(),
+          Note = character(),
+          `Start Date` = as.Date(character()),
+          `End date` = as.Date(character()),
+          FTE = numeric(),
+          Amount = numeric(),
+          needs_amendment = logical()
+        ))
+      }
+
+      salaries_lookup <- make_salary_lookup(rv$salaries)
+      long <- build_long_budget(rv$posts, input$budget_start, input$budget_end, salaries_lookup = salaries_lookup, inflation_pct = input$inflation_pct)
+      if (!nrow(long)) {
+        return(tibble(
+          id = integer(),
+          Period = character(),
+          `Post name` = character(),
+          Center = character(),
+          Category = character(),
+          Note = character(),
+          `Start Date` = as.Date(character()),
+          `End date` = as.Date(character()),
+          FTE = numeric(),
+          Amount = numeric(),
+          needs_amendment = logical()
+        ))
+      }
+
+      if (apply_filters && !is.null(input$filter_month_range) && all(!is.na(input$filter_month_range))) {
+        mstart <- as.Date(input$filter_month_range[1])
+        mend <- as.Date(input$filter_month_range[2])
+        long <- long %>% filter(month >= mstart, month <= mend)
+      }
+
+      meta <- rv$posts %>%
+        select(id, start_date, end_date, note, needs_amendment)
+
+      out <- long %>%
+        left_join(meta, by = "id") %>%
+        mutate(
+          Period = case_when(
+            period_choice == "month" ~ period_month,
+            period_choice == "calendar_year" ~ paste0("Calendar year ", calendar_year),
+            TRUE ~ paste0("Project year ", project_year)
+          ),
+          `Post name` = post_name,
+          Center = center,
+          Category = category,
+          Note = note,
+          `Start Date` = start_date,
+          `End date` = end_date,
+          FTE = fte,
+          Value = value,
+          needs_amendment = needs_amendment
+        ) %>%
+        select(id, Period, `Post name`, Center, Category, Note, `Start Date`, `End date`, FTE, Value, needs_amendment)
+
+      if (apply_filters) {
+        if (!is.null(input$filter_name) && length(input$filter_name) > 0) {
+          out <- out %>% filter(`Post name` %in% input$filter_name)
+        }
+        if (!is.null(input$filter_center) && length(input$filter_center) > 0) {
+          out <- out %>% filter(Center %in% input$filter_center)
+        }
+        if (!is.null(input$filter_category) && length(input$filter_category) > 0) {
+          out <- out %>% filter(Category %in% input$filter_category)
+        }
+      }
+
+      squash <- input$squash_dims
+      if (is.null(squash)) squash <- character(0)
+
+      if ("Period" %in% squash) out$Period <- "All periods"
+      if ("Post name" %in% squash) out$`Post name` <- "All posts"
+      if ("Center" %in% squash) out$Center <- "All centers"
+      if ("Category" %in% squash) out$Category <- "All categories"
+      if ("Post name" %in% squash) out$Note <- "Mixed notes"
+
+      group_cols <- c()
+      if (!("Period" %in% squash)) group_cols <- c(group_cols, "Period")
+      if (!("Post name" %in% squash)) group_cols <- c(group_cols, "Post name")
+      if (!("Center" %in% squash)) group_cols <- c(group_cols, "Center")
+      if (!("Category" %in% squash)) group_cols <- c(group_cols, "Category")
+      if (length(group_cols) == 0) group_cols <- "Period"
+
+      out <- out %>%
+        group_by(across(all_of(group_cols))) %>%
+        summarise(
+          Period = if ("Period" %in% group_cols) first(Period) else "All periods",
+          `Post name` = if ("Post name" %in% group_cols) first(`Post name`) else "All posts",
+          Center = if ("Center" %in% group_cols) first(Center) else "All centers",
+          Category = if ("Category" %in% group_cols) first(Category) else "All categories",
+          Note = if (n_distinct(Note) == 1) first(Note) else "Mixed notes",
+          `Start Date` = if (n_distinct(`Start Date`) == 1) first(`Start Date`) else as.Date(NA),
+          `End date` = if (n_distinct(`End date`) == 1) first(`End date`) else as.Date(NA),
+          FTE = if (n_distinct(FTE) == 1) first(FTE) else NA_real_,
+          Value = sum(Value),
+          needs_amendment = any(needs_amendment, na.rm = TRUE),
+          id = min(id),
+          .groups = "drop"
+        )
+
+      if (apply_filters) {
+        if (!is.null(input$filter_amount_min) && !is.na(input$filter_amount_min)) {
+          out <- out %>% filter(Value >= input$filter_amount_min)
+        }
+        if (!is.null(input$filter_amount_max) && !is.na(input$filter_amount_max)) {
+          out <- out %>% filter(Value <= input$filter_amount_max)
+        }
+        if (!is.null(input$filter_text) && nzchar(trimws(input$filter_text))) {
+          txt <- tolower(trimws(input$filter_text))
+          out <- out %>%
+            filter(
+              grepl(txt, tolower(Period), fixed = TRUE) |
+                grepl(txt, tolower(`Post name`), fixed = TRUE) |
+                grepl(txt, tolower(Center), fixed = TRUE) |
+                grepl(txt, tolower(Category), fixed = TRUE) |
+                grepl(txt, tolower(Note), fixed = TRUE)
+            )
+        }
+      }
+
+      out %>%
+        transmute(id, Period, `Post name`, Center, Category, Note, `Start Date`, `End date`, FTE, Amount = Value, needs_amendment) %>%
+        arrange(Center, `Post name`, Period)
+    }
+
+    build_display_table(input$period_format, apply_filters = TRUE)
+  })
+
+  output$posts_table <- renderDT({
+    tbl <- filtered_posts()
+    datatable(
+      tbl,
+      selection = "single",
+      rownames = FALSE,
+      filter = "none",
+      options = list(
+        pageLength = 25,
+        lengthMenu = c(10, 25, 50, 100),
+        stateSave = TRUE,
+        searching = FALSE,
+        scrollX = TRUE,
+        columnDefs = list(list(targets = c(0, 10), visible = FALSE)),
+        rowCallback = JS(
+          "function(row, data) {",
+          "  var flagged = data[10];",
+          "  if (flagged === true || flagged === 'TRUE' || flagged === 'true') {",
+          "    $(row).css('background-color', 'rgba(255, 0, 0, 0.2)');",
+          "  }",
+          "}"
+        )
+      )
+    ) %>%
+      formatRound("Amount", digits = 2, interval = 3, mark = ",")
+  })
+
+  selected_post_id <- reactive({
+    sel <- input$posts_table_rows_selected
+    tbl <- filtered_posts()
+    if (!length(sel) || !nrow(tbl)) return(NA_integer_)
+    tbl$id[sel]
+  })
+
+  observeEvent(input$constant_expr, {
+    rv$constant_expr_draft <- input$constant_expr
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$function_expr, {
+    rv$function_expr_draft <- input$function_expr
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$edit_selected, {
+    sid <- selected_post_id()
+    req(!is.na(sid))
+
+    row <- rv$posts %>% filter(id == sid)
+    req(nrow(row) == 1)
+
+    rv$editing_id <- sid
+    rv$variable_defaults <- unlist(row$value_vector[[1]], use.names = FALSE)
+  rv$constant_expr_draft <- row$constant_expr
+  rv$function_expr_draft <- row$function_expr
+
+    updateTextInput(session, "post_name", value = row$post_name)
+    updateTextInput(session, "center", value = row$center)
+    updateSelectInput(session, "category", selected = row$category)
+    updateDateInput(session, "post_start", value = row$start_date)
+    updateDateInput(session, "post_end", value = row$end_date)
+    updateNumericInput(session, "fte", value = row$fte)
+    updateSelectInput(session, "value_mode", selected = row$value_mode)
+    updateSelectInput(session, "value_unit", selected = row$value_unit)
+    updateTextInput(session, "constant_expr", value = row$constant_expr)
+    updateTextInput(session, "function_expr", value = row$function_expr)
+    updateTextAreaInput(session, "note", value = row$note)
+
+    set_success("Post loaded into form for editing.")
+  })
+
+  observeEvent(input$delete_selected, {
+    sid <- selected_post_id()
+    req(!is.na(sid))
+    rv$posts <- rv$posts %>% filter(id != sid)
+    set_success("Post deleted.")
+  })
+
+  observeEvent(input$add_or_update, {
+    rv$form_error_text <- NULL
+    rv$export_error_text <- NULL
+
+    missing_fields <- c()
+    if (is.null(input$post_name) || !nzchar(trimws(input$post_name))) missing_fields <- c(missing_fields, "Post name")
+    if (is.null(input$center) || !nzchar(trimws(input$center))) missing_fields <- c(missing_fields, "Center")
+    if (is.null(input$category) || !nzchar(trimws(input$category))) missing_fields <- c(missing_fields, "Category")
+    if (is.null(input$post_start) || is.na(input$post_start)) missing_fields <- c(missing_fields, "Post start")
+    if (is.null(input$post_end) || is.na(input$post_end)) missing_fields <- c(missing_fields, "Post end")
+
+    if (length(missing_fields) > 0) {
+      rv$form_error_text <- paste("Required fields missing:", paste(missing_fields, collapse = ", "))
+      return()
+    }
+
+    if (input$post_end < input$post_start) {
+      rv$form_error_text <- "Post end must be on or after post start."
+      return()
+    }
+
+    vec <- numeric()
+    if (input$value_mode == "variable") {
+      n_vals <- required_value_count()
+      vec <- map_dbl(seq_len(n_vals), function(i) {
+        as.numeric(input[[paste0("var_value_", i)]])
+      })
+    }
+
+    new_row <- tibble(
+      id = if (is.na(rv$editing_id)) rv$next_id else rv$editing_id,
+      center = trimws(input$center),
+      post_name = input$post_name,
+      category = input$category,
+      start_date = as.Date(input$post_start),
+      end_date = as.Date(input$post_end),
+      fte = suppressWarnings(as.numeric(input$fte)),
+      value_mode = input$value_mode,
+      value_unit = input$value_unit,
+      constant_expr = ifelse(is.null(input$constant_expr), rv$constant_expr_draft, input$constant_expr),
+      function_expr = ifelse(is.null(input$function_expr), rv$function_expr_draft, input$function_expr),
+      value_vector = list(vec),
+      note = input$note,
+      needs_amendment = FALSE
+    )
+
+    dup <- rv$posts %>%
+      filter(
+        tolower(center) == tolower(new_row$center),
+        tolower(post_name) == tolower(new_row$post_name),
+        id != new_row$id
+      )
+
+    if (nrow(dup) > 0) {
+      rv$form_error_text <- "A post with the same name already exists in this center. Please rename it or edit the existing post."
+      return()
+    }
+
+    valid <- tryCatch({
+      candidate_posts <- rv$posts %>% filter(id != new_row$id) %>% bind_rows(new_row)
+      row_months <- month_sequence(new_row$start_date, new_row$end_date)
+      row_fte_monthly_total <- map_dbl(row_months, function(m) {
+        sum(candidate_posts$fte[candidate_posts$start_date <= m & candidate_posts$end_date >= m], na.rm = TRUE)
+      })
+      invisible(resolve_post_values(
+        new_row,
+        salaries_lookup = make_salary_lookup(rv$salaries),
+        inflation_pct = input$inflation_pct,
+        fte_monthly_total = row_fte_monthly_total
+      ))
+      TRUE
+    }, error = function(e) {
+      rv$form_error_text <- e$message
+      FALSE
+    })
+
+    if (!valid) return()
+
+    if (is.na(rv$editing_id)) {
+      rv$posts <- bind_rows(rv$posts, new_row)
+      rv$next_id <- rv$next_id + 1L
+      set_success(paste("Post added:", new_row$post_name, "in", new_row$center))
+    } else {
+      rv$posts <- rv$posts %>%
+        filter(id != rv$editing_id) %>%
+        bind_rows(new_row)
+      set_success(paste("Post updated:", new_row$post_name, "in", new_row$center))
+    }
+
+    rv$posts <- flag_posts(rv$posts, input$budget_start, input$budget_end)
+    reset_form()
+  })
+
+  output$amendment_status <- renderUI({
+    n_flagged <- sum(rv$posts$needs_amendment, na.rm = TRUE)
+    if (n_flagged == 0) {
+      tags$span(style = "color: #0f7d2c; font-weight: 600;", "All posts are within the current budget period.")
+    } else {
+      tags$span(style = "color: #a94442; font-weight: 600;", paste(n_flagged, "post(s) require amendment before finalisation."))
+    }
+  })
+
+  output$export_control <- renderUI({
+    n_flagged <- sum(rv$posts$needs_amendment, na.rm = TRUE)
+    if (n_flagged > 0) {
+      actionButton("export_xlsx", "Export blocked: amend posts first", class = "btn-warning")
+    } else {
+      actionButton("export_xlsx", "Export Budget.xlsx", class = "btn-primary")
+    }
+  })
+
+  observeEvent(input$show_formula_help, {
+    showModal(modalDialog(
+      title = "Formula variables and helpers",
+      easyClose = TRUE,
+      footer = modalButton("Close"),
+      tags$p("Available in amount formulas (function mode):"),
+      tags$ul(
+        tags$li(tags$b("FTE"), " - current post FTE"),
+        tags$li(tags$b("n"), " - required vector length (months)"),
+        tags$li(tags$b("months"), " - month vector for current post date range"),
+        tags$li(tags$b("fte_monthly_total"), " - vector of summed FTE across all posts for each month in the current post range"),
+        tags$li(tags$b("fte_monthly_sum"), " - scalar sum of fte_monthly_total"),
+        tags$li(tags$b("inflation_pct"), " - yearly inflation percentage"),
+        tags$li(tags$b("inflation_month_factors"), " - month-wise multipliers based on calendar year relative to the first selected month"),
+        tags$li(tags$b("inflation_year_factors"), " - year-wise multipliers"),
+        tags$li(tags$b("apply_inflation_month(base_value)"), " - returns a month-length vector for the current post range with calendar-year inflation applied"),
+        tags$li(tags$b("apply_inflation_year(base_value)"), " - returns a year-length vector with yearly inflation applied")
+      ),
+      tags$p("Salary references:"),
+      tags$ul(
+        tags$li(tags$b("salaries"), " - lookup table indexed by identifier and selector"),
+        tags$li("Identifiers: s1, s2, s3, ..."),
+        tags$li("Monthly selectors: base_m, pension_m, own_pension_m, holiday_base_m, holiday_m, total_m, total_holidays_deducted_m"),
+        tags$li("Yearly selectors: base_y, pension_y, own_pension_y, holiday_base_y, holiday_y, total_y, total_holidays_deducted_y"),
+        tags$li("Backwards compatible selectors: base, pension, own_pension, holiday_base, holiday, total, total_holidays_deducted (monthly)")
+      ),
+      tags$p("Examples:"),
+      tags$pre("apply_inflation_month(salaries[s1, \"total_m\"])")
+    ))
+  })
+
+  build_export_sheet <- function(period_choice) {
+    if (!nrow(rv$posts)) {
+      return(tibble(
+        Period = character(),
+        `Post name` = character(),
+        Center = character(),
+        Category = character(),
+        Note = character(),
+        `Start Date` = character(),
+        `End date` = character(),
+        FTE = numeric(),
+        Amount = numeric()
+      ))
+    }
+
+    long <- build_long_budget(
+      rv$posts,
+      input$budget_start,
+      input$budget_end,
+      salaries_lookup = make_salary_lookup(rv$salaries),
+      inflation_pct = input$inflation_pct
+    )
+    if (!nrow(long)) {
+      return(tibble(
+        Period = character(),
+        `Post name` = character(),
+        Center = character(),
+        Category = character(),
+        Note = character(),
+        `Start Date` = character(),
+        `End date` = character(),
+        FTE = numeric(),
+        Amount = numeric()
+      ))
+    }
+
+    meta <- rv$posts %>%
+      select(id, start_date, end_date, note)
+
+    out <- long %>%
+      left_join(meta, by = "id") %>%
+      mutate(
+        Period = case_when(
+          period_choice == "month" ~ period_month,
+          period_choice == "calendar_year" ~ paste0("Calendar year ", calendar_year),
+          TRUE ~ paste0("Project year ", project_year)
+        ),
+        `Post name` = post_name,
+        Center = center,
+        Category = category,
+        Note = note,
+        `Start Date` = start_date,
+        `End date` = end_date,
+        FTE = fte,
+        Amount = value
+      ) %>%
+      select(Period, `Post name`, Center, Category, Note, `Start Date`, `End date`, FTE, Amount)
+
+    squash <- input$squash_dims
+    if (is.null(squash)) squash <- character(0)
+
+    if ("Period" %in% squash) out$Period <- "All periods"
+    if ("Post name" %in% squash) out$`Post name` <- "All posts"
+    if ("Center" %in% squash) out$Center <- "All centers"
+    if ("Category" %in% squash) out$Category <- "All categories"
+    if ("Post name" %in% squash) out$Note <- "Mixed notes"
+
+    group_cols <- c()
+    if (!("Period" %in% squash)) group_cols <- c(group_cols, "Period")
+    if (!("Post name" %in% squash)) group_cols <- c(group_cols, "Post name")
+    if (!("Center" %in% squash)) group_cols <- c(group_cols, "Center")
+    if (!("Category" %in% squash)) group_cols <- c(group_cols, "Category")
+    if (length(group_cols) == 0) group_cols <- "Period"
+
+    out %>%
+      group_by(across(all_of(group_cols))) %>%
+      summarise(
+        Period = if ("Period" %in% group_cols) first(Period) else "All periods",
+        `Post name` = if ("Post name" %in% group_cols) first(`Post name`) else "All posts",
+        Center = if ("Center" %in% group_cols) first(Center) else "All centers",
+        Category = if ("Category" %in% group_cols) first(Category) else "All categories",
+        Note = if (n_distinct(Note) == 1) first(Note) else "Mixed notes",
+        `Start Date` = if (n_distinct(`Start Date`) == 1) first(`Start Date`) else as.Date(NA),
+        `End date` = if (n_distinct(`End date`) == 1) first(`End date`) else as.Date(NA),
+        FTE = if (n_distinct(FTE) == 1) first(FTE) else NA_real_,
+        Amount = sum(Amount),
+        .groups = "drop"
+      ) %>%
+      mutate(
+        `Start Date` = as.character(`Start Date`),
+        `End date` = as.character(`End date`)
+      ) %>%
+      arrange(Center, `Post name`, Period)
+  }
+
+  to_js_rows <- function(df) {
+    if (!nrow(df)) return(list())
+    lapply(seq_len(nrow(df)), function(i) as.list(df[i, , drop = FALSE]))
+  }
+
+  observeEvent(input$export_xlsx, {
+    rv$export_error_text <- NULL
+
+    n_flagged <- sum(rv$posts$needs_amendment, na.rm = TRUE)
+    if (n_flagged > 0) {
+      rv$export_error_text <- paste(n_flagged, "post(s) must be amended before export.")
+      return()
+    }
+
+    sheets <- list(
+      by_month = to_js_rows(build_export_sheet("month")),
+      by_calendar_year = to_js_rows(build_export_sheet("calendar_year")),
+      by_project_year = to_js_rows(build_export_sheet("project_year")),
+      posts = to_js_rows(serialize_posts(rv$posts)),
+      salaries = to_js_rows(serialize_salaries(rv$salaries)),
+      meta = to_js_rows(tibble(
+        key = c("budget_start", "budget_end", "inflation_pct"),
+        value = c(as.character(input$budget_start), as.character(input$budget_end), as.character(input$inflation_pct))
+      ))
+    )
+
+    session$sendCustomMessage("download-xlsx", list(
+      filename = "Budget_builder.xlsx",
+      sheets = sheets
+    ))
+
+    set_success("Export started: Budget_builder.xlsx")
+  })
+
+  observeEvent(input$import_file, {
+    req(input$import_file)
+
+    if (!requireNamespace("readxl", quietly = TRUE)) {
+      show_error_modal("Package 'readxl' is required for XLSX import.")
+      return()
+    }
+
+    path <- input$import_file$datapath
+
+    ok <- tryCatch({
+      sheets <- readxl::excel_sheets(path)
+      required_sheets <- c("posts", "meta")
+
+      if (!all(required_sheets %in% sheets)) {
+        stop("Import file must contain 'posts' and 'meta' sheets.")
+      }
+
+      imported_posts <- readxl::read_excel(path, sheet = "posts", col_types = "text")
+      imported_meta <- readxl::read_excel(path, sheet = "meta", col_types = "text")
+
+      if (!all(c("key", "value") %in% names(imported_meta))) {
+        stop("Meta sheet must have columns 'key' and 'value'.")
+      }
+
+      start_val <- imported_meta$value[imported_meta$key == "budget_start"]
+      end_val <- imported_meta$value[imported_meta$key == "budget_end"]
+      inflation_val <- imported_meta$value[imported_meta$key == "inflation_pct"]
+
+      if (length(start_val) != 1 || length(end_val) != 1) {
+        stop("Meta sheet must contain one budget_start and one budget_end.")
+      }
+
+      posts_parsed <- parse_posts(as_tibble(imported_posts))
+
+      salaries_parsed <- make_empty_salaries()
+      if ("salaries" %in% sheets) {
+        imported_salaries <- readxl::read_excel(path, sheet = "salaries", col_types = "text")
+        salaries_parsed <- parse_salaries(as_tibble(imported_salaries))
+      }
+
+      updateDateInput(session, "budget_start", value = as.Date(start_val))
+      updateDateInput(session, "budget_end", value = as.Date(end_val))
+      if (length(inflation_val) == 1 && !is.na(suppressWarnings(as.numeric(inflation_val)))) {
+        updateNumericInput(session, "inflation_pct", value = as.numeric(inflation_val))
+      }
+
+      rv$posts <- posts_parsed
+      rv$next_id <- ifelse(nrow(posts_parsed), max(posts_parsed$id, na.rm = TRUE) + 1L, 1L)
+      rv$posts <- flag_posts(rv$posts, as.Date(start_val), as.Date(end_val))
+      rv$salaries <- salaries_parsed
+      rv$next_salary_id <- ifelse(nrow(salaries_parsed), max(salaries_parsed$id, na.rm = TRUE) + 1L, 1L)
+      TRUE
+    }, error = function(e) {
+      show_error_modal(paste("Import failed:", e$message))
+      FALSE
+    })
+
+    if (isTRUE(ok)) {
+      set_success("Import completed.")
+    }
+  })
+}
+
+shinyApp(ui, server)
+```
