@@ -255,11 +255,254 @@ make_salary_lookup <- function(salaries_tbl) {
   out
 }
 
+# Issue #4: Create salary environment objects for formula access (identifier$total_m style)
+make_salary_env_objects <- function(salaries_tbl) {
+  if (!nrow(salaries_tbl)) {
+    return(list())
+  }
+  
+  salaries_list <- list()
+  for (i in seq_len(nrow(salaries_tbl))) {
+    row <- salaries_tbl[i, ]
+    identifier <- row$identifier
+    # Create a one-row data frame for each salary
+    salary_obj <- data.frame(
+      base_m = row$base_salary_monthly,
+      pension_m = row$pension_amount_monthly,
+      own_pension_m = row$own_pension_amount_monthly,
+      holiday_base_m = row$holiday_allowance_total_monthly,
+      holiday_m = row$holiday_allowance_monthly,
+      total_m = row$total_salary_monthly,
+      total_y = row$total_salary_yearly,
+      total_deducted_m = row$total_salary_holidays_deducted_monthly,
+      total_deducted_y = row$total_salary_holidays_deducted_yearly,
+      stringsAsFactors = FALSE
+    )
+    rownames(salary_obj) <- identifier
+    salaries_list[[identifier]] <- salary_obj
+  }
+  salaries_list
+}
+
 expand_year_values <- function(values, n_months) {
   rep(values / 12, each = 12)[seq_len(n_months)]
 }
 
-resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflation_pct = 0, fte_monthly_total = NULL) {
+# === WORKBOOK NAMING HELPERS (Issue #3) ===
+sanitize_workbook_name <- function(name) {
+  if (is.null(name) || !nzchar(trimws(name))) return("")
+  # Allow letters, numbers, spaces, dash, underscore, parentheses
+  sanitized <- gsub("[^a-zA-Z0-9 _\\-().]", "", trimws(name))
+  substring(sanitized, 1, 80)
+}
+
+validate_workbook_name <- function(name) {
+  if (is.null(name) || !nzchar(trimws(name))) {
+    return("Workbook name is required.")
+  }
+  if (nchar(name) > 80) {
+    return("Workbook name must be 80 characters or fewer.")
+  }
+  if (grepl("[/\\\\:|*?\"<>|]", name)) {
+    return("Workbook name contains invalid characters.")
+  }
+  NULL
+}
+
+workbook_name_from_filename <- function(filename) {
+  if (is.null(filename) || !nzchar(filename)) return("")
+  basename(filename) %>%
+    sub("\\.xlsx$", "", ., ignore.case = TRUE)
+}
+
+# === SALARY IDENTIFIER HELPERS (Issue #4) ===
+generate_salary_identifier <- function(salary_name, existing_identifiers = character()) {
+  if (is.null(salary_name) || !nzchar(trimws(salary_name))) {
+    return("salary_1")
+  }
+  
+  # Convert name to lowercase slug
+  slug <- tolower(trimws(salary_name)) %>%
+    gsub("[^a-z0-9]", "_", .) %>%
+    gsub("_+", "_", .) %>%
+    gsub("^_|_$", "", .)
+  
+  if (nchar(slug) == 0) slug <- "salary"
+  
+  # Check for collision
+  if (!(slug %in% existing_identifiers)) {
+    return(slug)
+  }
+  
+  # Add numeric suffix for duplicates
+  counter <- 1
+  while (paste0(slug, "_", counter) %in% existing_identifiers) {
+    counter <- counter + 1
+  }
+  paste0(slug, "_", counter)
+}
+
+# === CATEGORY VALIDATION HELPERS (Issue #2) ===
+validate_amount_for_category <- function(amount, operator, threshold, unit_choice = "month", 
+                                         value_unit = "month", value_mode = "constant",
+                                         constant_expr = NULL, function_expr = NULL, 
+                                         variable_values = NULL) {
+  # Returns NULL if valid, otherwise error message string
+  
+  if (is.null(operator) || !nzchar(trimws(operator)) || 
+      is.null(threshold) || is.na(as.numeric(threshold))) {
+    return(NULL) # No validation rule
+  }
+  
+  threshold <- as.numeric(threshold)
+  
+  # Compute actual amount to validate based on mode
+  amounts_to_check <- numeric()
+  
+  if (value_mode == "constant") {
+    if (!is.null(constant_expr) && nzchar(trimws(constant_expr))) {
+      tryCatch({
+        val <- eval(parse(text = constant_expr), envir = list(FTE = 1, n = 1))
+        amounts_to_check <- c(val)
+      }, error = function(e) {
+        return()
+      })
+    }
+  } else if (value_mode == "function") {
+    # Skip validation for formulas (user can override)
+    return(NULL)
+  } else if (value_mode == "variable") {
+    if (!is.null(variable_values) && length(variable_values) > 0) {
+      amounts_to_check <- variable_values
+    }
+  }
+  
+  if (length(amounts_to_check) == 0) return(NULL)
+  
+  # Normalize amounts to chosen unit if needed
+  if (unit_choice != value_unit && value_unit == "year" && unit_choice == "month") {
+    amounts_to_check <- amounts_to_check / 12
+  } else if (unit_choice != value_unit && value_unit == "month" && unit_choice == "year") {
+    amounts_to_check <- amounts_to_check * 12
+  }
+  
+  # Check operator
+  violation <- FALSE
+  for (amt in amounts_to_check) {
+    check <- switch(operator,
+      "<" = !(amt < threshold),
+      "<=" = !(amt <= threshold),
+      "=" = !(amt == threshold),
+      ">" = !(amt > threshold),
+      ">=" = !(amt >= threshold),
+      "!=" = !(amt != threshold),
+      FALSE
+    )
+    if (check) {
+      violation <- TRUE
+      break
+    }
+  }
+  
+  if (violation) {
+    return(paste("Amount validation failed: must be", operator, threshold, "per", unit_choice))
+  }
+  NULL
+}
+
+make_empty_category_registry <- function() {
+  tibble(
+    id = integer(),
+    name = character(),
+    operator = character(),
+    amount = numeric(),
+    per_unit = character(),
+    is_default = logical(),
+    is_deleted = logical()
+  )
+}
+
+make_default_categories <- function() {
+  tibble(
+    id = 1L:18L,
+    name = c(
+      "Salary, clinician",
+      "Salary for technicians",
+      "Salary Ph.D. students",
+      "Tuition fees for Ph.D. students",
+      "Salary for postdocs",
+      "Salary for research year (RY)",
+      "Salary, employees",
+      "Travel and accommodation",
+      "Travel, extended - applicant",
+      "Conferences",
+      "Publication costs",
+      "Communication and outreach",
+      "Equipment",
+      "Operating expenses",
+      "Consumables",
+      "Bench fee",
+      "Project supplements",
+      "Administrative expenses"
+    ),
+    operator = rep("", 18),
+    amount = rep(NA_real_, 18),
+    per_unit = rep("", 18),
+    is_default = rep(TRUE, 18),
+    is_deleted = rep(FALSE, 18)
+  )
+}
+
+make_empty_template_registry <- function() {
+  tibble(
+    id = integer(),
+    name = character(),
+    category = character(),
+    center = character(),
+    mode = character(),
+    unit = character(),
+    constant_expr = character(),
+    function_expr = character(),
+    fte = numeric(),
+    note = character(),
+    values = list(),
+    duration_years = numeric(),
+    is_default = logical(),
+    is_deleted = logical()
+  )
+}
+
+make_default_templates <- function() {
+  tibble(
+    id = 1L:4L,
+    name = c("Custom", "PhD", "RY", "Postdoc"),
+    category = c("Operating expenses", "Salary Ph.D. students", "Salary for research year (RY)", "Salary for postdocs"),
+    center = rep("", 4),
+    mode = c("constant", "variable", "variable", "variable"),
+    unit = c("month", "year", "year", "year"),
+    constant_expr = rep("0", 4),
+    function_expr = c("rep(0, n)", "rep(0, n)", "rep(10000, n)", "rep(0, n)"),
+    fte = c(NA_real_, 1, NA_real_, 1),
+    note = c("", "Template values from budget v1", "Template values from budget v1", "Template values from budget v1"),
+    values = list(numeric(), c(509928, 539376, 568392), c(144000), c(720000, 744000, 768000)),
+    duration_years = c(NA_real_, 3, 1, 3),
+    is_default = rep(TRUE, 4),
+    is_deleted = rep(FALSE, 4)
+  )
+}
+
+# === POST INTEGRITY HELPERS ===
+find_posts_with_deleted_category <- function(posts_tbl, category_registry) {
+  if (!nrow(posts_tbl) || !nrow(category_registry)) return(integer())
+  deleted_cats <- category_registry %>%
+    filter(is_deleted) %>%
+    pull(name)
+  posts_tbl %>%
+    filter(category %in% deleted_cats) %>%
+    pull(id)
+}
+
+resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflation_pct = 0, fte_monthly_total = NULL, salaries_tbl = NULL) {
   months <- month_sequence(post_row$start_date, post_row$end_date)
   n_months <- length(months)
   n_years <- ceiling(n_months / 12)
@@ -278,6 +521,12 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
     fte_monthly_total <- rep(as.numeric(fte_monthly_total), length.out = n_months)
   }
 
+  # Issue #4: Generate salary objects for identifier$total_m access
+  salary_objs <- list()
+  if (!is.null(salaries_tbl) && nrow(salaries_tbl) > 0) {
+    salary_objs <- make_salary_env_objects(salaries_tbl)
+  }
+  
   salary_ids <- rownames(salaries_lookup)
   extra_env <- list(
     salaries = salaries_lookup,
@@ -296,9 +545,11 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
       x2 * inflation_year_factors
     }
   )
-  if (length(salary_ids) > 0) {
-    for (sid in salary_ids) {
-      extra_env[[sid]] <- sid
+  
+  # Inject salary objects for new syntax (issue #4)
+  if (length(salary_objs) > 0) {
+    for (sid in names(salary_objs)) {
+      extra_env[[sid]] <- salary_objs[[sid]]
     }
   }
 
@@ -362,7 +613,7 @@ flag_posts <- function(posts_tbl, budget_start, budget_end) {
     mutate(needs_amendment = start_date < budget_start | end_date > budget_end)
 }
 
-build_long_budget <- function(posts_tbl, budget_start, budget_end, salaries_lookup = data.frame(), inflation_pct = 0) {
+build_long_budget <- function(posts_tbl, budget_start, budget_end, salaries_lookup = data.frame(), inflation_pct = 0, salaries_tbl = NULL) {
   if (!nrow(posts_tbl)) {
     return(tibble())
   }
@@ -383,7 +634,8 @@ build_long_budget <- function(posts_tbl, budget_start, budget_end, salaries_look
         row,
         salaries_lookup = salaries_lookup,
         inflation_pct = inflation_pct,
-        fte_monthly_total = row_fte_monthly_total
+        fte_monthly_total = row_fte_monthly_total,
+        salaries_tbl = salaries_tbl
       ),
       error = function(e) NULL
     )
@@ -409,7 +661,7 @@ build_long_budget <- function(posts_tbl, budget_start, budget_end, salaries_look
   })
 }
 
-post_total <- function(post_row, all_posts_tbl = post_row, salaries_lookup = data.frame(), inflation_pct = 0) {
+post_total <- function(post_row, all_posts_tbl = post_row, salaries_lookup = data.frame(), inflation_pct = 0, salaries_tbl = NULL) {
   row_months <- month_sequence(post_row$start_date, post_row$end_date)
   row_fte_monthly_total <- map_dbl(row_months, function(m) {
     sum(all_posts_tbl$fte[all_posts_tbl$start_date <= m & all_posts_tbl$end_date >= m], na.rm = TRUE)
@@ -419,7 +671,8 @@ post_total <- function(post_row, all_posts_tbl = post_row, salaries_lookup = dat
     post_row,
     salaries_lookup = salaries_lookup,
     inflation_pct = inflation_pct,
-    fte_monthly_total = row_fte_monthly_total
+    fte_monthly_total = row_fte_monthly_total,
+    salaries_tbl = salaries_tbl
   )
   sum(resolved$value)
 }
@@ -461,6 +714,10 @@ serialize_salaries <- function(salaries_tbl) {
 }
 
 parse_salaries <- function(salaries_tbl) {
+  if (is.null(salaries_tbl) || !nrow(salaries_tbl)) {
+    return(make_empty_salaries())
+  }
+
   required <- c(
     "id", "identifier", "name", "unit", "base_salary", "pension_mode", "pension_value",
     "own_pension_pct", "base_salary_monthly", "pension_amount_monthly", "own_pension_amount_monthly", "holiday_allowance_total_monthly",
@@ -469,12 +726,16 @@ parse_salaries <- function(salaries_tbl) {
     "holiday_allowance_yearly", "total_salary_yearly", "total_salary_holidays_deducted_yearly"
   )
   if (!all(required %in% names(salaries_tbl))) {
-    stop("Imported salaries sheet is missing required columns.", call. = FALSE)
+    return(make_empty_salaries())
   }
 
   salaries_tbl %>%
     mutate(
       id = as.integer(id),
+      identifier = as.character(identifier),
+      name = as.character(name),
+      unit = as.character(unit),
+      pension_mode = as.character(pension_mode),
       base_salary = as.numeric(base_salary),
       pension_value = as.numeric(pension_value),
       own_pension_pct = as.numeric(own_pension_pct),
@@ -564,7 +825,16 @@ ui <- fluidPage(
     });
     "
   ))),
-  titlePanel("Budget builder"),
+  # Issue #3: Workbook name header
+  fluidRow(
+    column(12, style = "padding: 15px;", 
+      fluidRow(
+        column(2, tags$label(strong("Workbook name:"))),
+        column(3, textInput("workbook_name", NULL, value = "Budget")),
+        column(7, uiOutput("workbook_name_error"))
+      )
+    )
+  ),
   sidebarLayout(
     sidebarPanel(
       h4("Continue from existing budget (optional)"),
@@ -578,11 +848,11 @@ ui <- fluidPage(
       uiOutput("budget_period_error"),
       hr(),
       h4("2) Add or edit post"),
-      selectInput("template_name", "Template", choices = names(post_templates), selected = "Custom"),
+      selectInput("template_name", "Template", choices = make_default_templates()$name, selected = "Custom"),
       actionButton("apply_template", "Apply template"),
       textInput("post_name", "Post name"),
       textInput("center", "Center", value = ""),
-      selectInput("category", "Category", choices = c("", categories), selected = ""),
+      selectInput("category", "Category", choices = c("", make_default_categories()$name), selected = ""),
       dateInput("post_start", "Post start"),
       dateInput("post_end", "Post end"),
       numericInput("fte", "FTE", value = NA_real_, min = 0, step = 0.1),
@@ -677,6 +947,56 @@ ui <- fluidPage(
           ),
           br(),
           textOutput("salary_identifier_help")
+        ),
+        # Issue #2: Categories and Templates settings tab
+        tabPanel(
+          "Categories & Templates",
+          h4("Manage Categories"),
+          fluidRow(
+            column(12,
+              DTOutput("categories_table"),
+              br(),
+              fluidRow(
+                column(2, textInput("cat_name", "Name")),
+                column(2, selectInput("cat_operator", "Operator", choices = c("", "<", "<=", "=", ">", ">=", "!="))),
+                column(2, numericInput("cat_amount", "Amount", value = NA_real_)),
+                column(2, selectInput("cat_per_unit", "Per", choices = c("", "month", "calendar year", "project year"))),
+                column(4, 
+                  fluidRow(
+                    column(6, actionButton("cat_add_or_update", "Add/Update Category")),
+                    column(6, actionButton("cat_delete_selected", "Delete Category", class = "btn-danger"))
+                  )
+                )
+              ),
+              actionButton("cat_clear_all", "Clear All Categories", class = "btn-warning"),
+              uiOutput("restore_categories_control"),
+              uiOutput("categories_error")
+            )
+          ),
+          br(),
+          h4("Manage Templates"),
+          fluidRow(
+            column(12,
+              DTOutput("templates_table"),
+              br(),
+              fluidRow(
+                column(3, textInput("tpl_name", "Template Name")),
+                column(3, selectInput("tpl_category", "Category", choices = c("", make_default_categories()$name), selected = "")),
+                column(3, selectInput("tpl_mode", "Mode", choices = c("constant", "function", "variable"), selected = "constant")),
+                column(3, selectInput("tpl_unit", "Unit", choices = c("month", "year"), selected = "month"))
+              ),
+              fluidRow(
+                column(12, textAreaInput("tpl_note", "Note", rows = 2))
+              ),
+              fluidRow(
+                column(6, actionButton("tpl_add_or_update", "Add/Update Template")),
+                column(6, actionButton("tpl_delete_selected", "Delete Template", class = "btn-danger"))
+              ),
+              actionButton("tpl_clear_all", "Clear All Templates", class = "btn-warning"),
+              uiOutput("restore_templates_control"),
+              uiOutput("templates_error")
+            )
+          )
         )
       )
     )
@@ -687,10 +1007,18 @@ server <- function(input, output, session) {
   rv <- reactiveValues(
     posts = make_empty_posts(),
     salaries = make_empty_salaries(),
+    workbook_name = "Budget",
+    workbook_name_error = NULL,
+    category_registry = make_default_categories(),
+    template_registry = make_default_templates(),
+    next_category_id = 19L,
+    next_template_id = 5L,
     next_id = 1L,
     next_salary_id = 1L,
     editing_id = NA_integer_,
     editing_salary_id = NA_integer_,
+    editing_category_id = NA_integer_,
+    editing_template_id = NA_integer_,
     variable_defaults = numeric(),
     constant_expr_draft = "0",
     function_expr_draft = "rep((510000*FTE)/12, n)",
@@ -698,6 +1026,9 @@ server <- function(input, output, session) {
     salary_error_text = NULL,
     budget_error_text = NULL,
     export_error_text = NULL,
+    categories_error_text = NULL,
+    templates_error_text = NULL,
+    settings_error_text = NULL,
     success_text = NULL,
     success_at = NULL
   )
@@ -739,6 +1070,11 @@ server <- function(input, output, session) {
     tags$div(class = "inline-error", rv$budget_error_text)
   })
 
+  output$workbook_name_error <- renderUI({
+    if (is.null(rv$workbook_name_error)) return(NULL)
+    tags$div(class = "inline-error", rv$workbook_name_error)
+  })
+
   output$form_error <- renderUI({
     if (is.null(rv$form_error_text)) return(NULL)
     tags$div(class = "inline-error", rv$form_error_text)
@@ -752,6 +1088,72 @@ server <- function(input, output, session) {
   output$salary_error <- renderUI({
     if (is.null(rv$salary_error_text)) return(NULL)
     tags$div(class = "inline-error", rv$salary_error_text)
+  })
+
+  output$categories_error <- renderUI({
+    if (is.null(rv$categories_error_text)) return(NULL)
+    tags$div(class = "inline-error", rv$categories_error_text)
+  })
+
+  output$templates_error <- renderUI({
+    if (is.null(rv$templates_error_text)) return(NULL)
+    tags$div(class = "inline-error", rv$templates_error_text)
+  })
+
+  output$categories_table <- renderDT({
+    cat_tbl <- rv$category_registry
+    needed <- c("id", "name", "operator", "amount", "per_unit", "is_default", "is_deleted")
+    if (!all(needed %in% names(cat_tbl))) {
+      cat_tbl <- make_default_categories()
+    }
+    cat_tbl <- cat_tbl %>%
+      mutate(
+        id = suppressWarnings(as.integer(id)),
+        name = as.character(name),
+        operator = as.character(operator),
+        amount = suppressWarnings(as.numeric(amount)),
+        per_unit = as.character(per_unit),
+        is_default = as.logical(is_default),
+        is_deleted = as.logical(is_deleted)
+      )
+
+    datatable(
+      cat_tbl %>%
+        filter(!is_deleted) %>%
+        select(name, operator, amount, per_unit),
+      colnames = c("Name", "Operator", "Amount", "Per"),
+      selection = "single",
+      rownames = FALSE,
+      options = list(pageLength = 10)
+    )
+  })
+
+  output$templates_table <- renderDT({
+    tpl_tbl <- rv$template_registry
+    needed <- c("id", "name", "category", "mode", "unit", "is_default", "is_deleted")
+    if (!all(needed %in% names(tpl_tbl))) {
+      tpl_tbl <- make_default_templates()
+    }
+    tpl_tbl <- tpl_tbl %>%
+      mutate(
+        id = suppressWarnings(as.integer(id)),
+        name = as.character(name),
+        category = as.character(category),
+        mode = as.character(mode),
+        unit = as.character(unit),
+        is_default = as.logical(is_default),
+        is_deleted = as.logical(is_deleted)
+      )
+
+    datatable(
+      tpl_tbl %>%
+        filter(!is_deleted) %>%
+        select(name, category, mode, unit),
+      colnames = c("Name", "Category", "Mode", "Unit"),
+      selection = "single",
+      rownames = FALSE,
+      options = list(pageLength = 10)
+    )
   })
 
   salary_calc_preview <- reactive({
@@ -846,10 +1248,11 @@ server <- function(input, output, session) {
 
   output$salary_identifier_help <- renderText({
     if (!nrow(rv$salaries)) {
-      return("Formula helper: after you add salaries, reference them like salaries[s1, \"total_m\"] (monthly) or salaries[s1, \"total_y\"] (yearly).")
+      return("Formula helper: after you add salaries, reference them like phd_student$total_m.")
     }
     ids <- paste(rv$salaries$identifier, collapse = ", ")
-    paste0("Formula helper: identifiers are ", ids, ". Example: apply_inflation_month(salaries[s1, \"total_m\"])")
+    first_id <- rv$salaries$identifier[[1]]
+    paste0("Formula helper: identifiers are ", ids, ". Example: apply_inflation_month(", first_id, "$total_m)")
   })
 
   selected_salary_id <- reactive({
@@ -883,7 +1286,12 @@ server <- function(input, output, session) {
 
     is_new <- is.na(rv$editing_salary_id)
     sid <- if (is_new) rv$next_salary_id else rv$editing_salary_id
-    identifier <- if (is_new) paste0("s", rv$next_salary_id) else (rv$salaries %>% filter(id == sid) %>% pull(identifier) %>% .[1])
+    if (is_new) {
+      existing_ids <- rv$salaries %>% pull(identifier)
+      identifier <- generate_salary_identifier(input$salary_name, existing_ids)
+    } else {
+      identifier <- rv$salaries %>% filter(id == sid) %>% pull(identifier) %>% .[1]
+    }
 
     row <- tibble(
       id = sid,
@@ -981,40 +1389,262 @@ server <- function(input, output, session) {
     rv$posts <- flag_posts(rv$posts, input$budget_start, input$budget_end)
   }, ignoreInit = FALSE)
 
+  # Issue #3: Workbook name validation
+  observeEvent(input$workbook_name, {
+    name <- input$workbook_name
+    error <- validate_workbook_name(name)
+    rv$workbook_name_error <- error
+    if (is.null(error)) {
+      rv$workbook_name <- sanitize_workbook_name(name)
+    }
+  }, ignoreInit = TRUE)
+
+  # Keep category/template selectors synchronized with registries
+  observe({
+    active_categories <- rv$category_registry %>% filter(!is_deleted) %>% pull(name)
+    updateSelectInput(session, "category", choices = c("", active_categories), selected = input$category)
+    updateSelectInput(session, "tpl_category", choices = c("", active_categories), selected = input$tpl_category)
+  })
+
+  observe({
+    active_templates <- rv$template_registry %>% filter(!is_deleted) %>% pull(name)
+    selected <- if (!is.null(input$template_name) && input$template_name %in% active_templates) input$template_name else active_templates[1]
+    updateSelectInput(session, "template_name", choices = active_templates, selected = selected)
+  })
+
+  output$restore_categories_control <- renderUI({
+    all_deleted <- nrow(rv$category_registry) > 0 && all(rv$category_registry$is_deleted)
+    if (!all_deleted) return(NULL)
+    actionButton("restore_default_categories", "Restore Default Categories", class = "btn-success")
+  })
+
+  output$restore_templates_control <- renderUI({
+    all_deleted <- nrow(rv$template_registry) > 0 && all(rv$template_registry$is_deleted)
+    if (!all_deleted) return(NULL)
+    actionButton("restore_default_templates", "Restore Default Templates", class = "btn-success")
+  })
+
+  selected_category_id <- reactive({
+    sel <- input$categories_table_rows_selected
+    visible_cats <- rv$category_registry %>% filter(!is_deleted)
+    if (!length(sel) || !nrow(visible_cats) || sel > nrow(visible_cats)) return(NA_integer_)
+    visible_cats$id[sel]
+  })
+
+  observeEvent(input$categories_table_rows_selected, {
+    cat_id <- selected_category_id()
+    req(!is.na(cat_id))
+    row <- rv$category_registry %>% filter(id == cat_id)
+    req(nrow(row) == 1)
+    rv$editing_category_id <- cat_id
+    updateTextInput(session, "cat_name", value = row$name)
+    updateSelectInput(session, "cat_operator", selected = row$operator)
+    updateNumericInput(session, "cat_amount", value = row$amount)
+    updateSelectInput(session, "cat_per_unit", selected = row$per_unit)
+  })
+
+  observeEvent(input$cat_add_or_update, {
+    rv$categories_error_text <- NULL
+    nm <- trimws(input$cat_name)
+    if (!nzchar(nm)) {
+      rv$categories_error_text <- "Category name is required."
+      return()
+    }
+
+    is_new <- is.na(rv$editing_category_id)
+    cat_id <- if (is_new) rv$next_category_id else rv$editing_category_id
+    prev <- rv$category_registry %>% filter(id == cat_id)
+    prev_default <- if (nrow(prev) == 1) isTRUE(prev$is_default) else FALSE
+
+    dup <- rv$category_registry %>%
+      filter(!is_deleted, id != cat_id, tolower(name) == tolower(nm))
+    if (nrow(dup) > 0) {
+      rv$categories_error_text <- "Category name already exists."
+      return()
+    }
+
+    new_cat <- tibble(
+      id = as.integer(cat_id),
+      name = nm,
+      operator = ifelse(is.null(input$cat_operator), "", input$cat_operator),
+      amount = suppressWarnings(as.numeric(input$cat_amount)),
+      per_unit = ifelse(is.null(input$cat_per_unit), "", input$cat_per_unit),
+      is_default = prev_default,
+      is_deleted = FALSE
+    )
+
+    old_name <- if (nrow(prev) == 1) prev$name[[1]] else NULL
+    rv$category_registry <- rv$category_registry %>% filter(id != cat_id) %>% bind_rows(new_cat)
+    if (is_new) rv$next_category_id <- rv$next_category_id + 1L
+
+    if (!is.null(old_name) && nzchar(old_name) && old_name != nm) {
+      rv$posts <- rv$posts %>% mutate(category = if_else(category == old_name, nm, category))
+    }
+
+    rv$editing_category_id <- NA_integer_
+    updateTextInput(session, "cat_name", value = "")
+    updateSelectInput(session, "cat_operator", selected = "")
+    updateNumericInput(session, "cat_amount", value = NA_real_)
+    updateSelectInput(session, "cat_per_unit", selected = "")
+    set_success(if (is_new) paste("Category added:", nm) else paste("Category updated:", nm))
+  })
+
+  observeEvent(input$cat_delete_selected, {
+    cat_id <- selected_category_id()
+    req(!is.na(cat_id))
+    deleted_cat_name <- rv$category_registry %>% filter(id == cat_id) %>% pull(name)
+    rv$category_registry <- rv$category_registry %>% mutate(is_deleted = if_else(id == cat_id, TRUE, is_deleted))
+    rv$posts <- rv$posts %>% mutate(needs_amendment = if_else(category == deleted_cat_name, TRUE, needs_amendment))
+    rv$editing_category_id <- NA_integer_
+    set_success("Category deleted and posts marked for amendment.")
+  })
+
+  observeEvent(input$cat_clear_all, {
+    showModal(modalDialog(
+      title = "Confirm Clear All Categories",
+      "Are you sure? This will delete all categories (including defaults).",
+      footer = tagList(actionButton("cat_clear_confirm", "Confirm", class = "btn-danger"), modalButton("Cancel"))
+    ))
+  })
+
+  observeEvent(input$cat_clear_confirm, {
+    rv$category_registry <- rv$category_registry %>% mutate(is_deleted = TRUE)
+    rv$posts <- rv$posts %>% mutate(needs_amendment = TRUE)
+    rv$editing_category_id <- NA_integer_
+    removeModal()
+    set_success("All categories cleared.")
+  })
+
+  observeEvent(input$restore_default_categories, {
+    defaults <- make_default_categories()
+    rv$category_registry <- defaults
+    rv$next_category_id <- max(defaults$id, na.rm = TRUE) + 1L
+    set_success("Default categories restored.")
+  })
+
+  selected_template_id <- reactive({
+    sel <- input$templates_table_rows_selected
+    visible_tpls <- rv$template_registry %>% filter(!is_deleted)
+    if (!length(sel) || !nrow(visible_tpls) || sel > nrow(visible_tpls)) return(NA_integer_)
+    visible_tpls$id[sel]
+  })
+
+  observeEvent(input$templates_table_rows_selected, {
+    tpl_id <- selected_template_id()
+    req(!is.na(tpl_id))
+    row <- rv$template_registry %>% filter(id == tpl_id)
+    req(nrow(row) == 1)
+    rv$editing_template_id <- tpl_id
+    updateTextInput(session, "tpl_name", value = row$name)
+    updateSelectInput(session, "tpl_category", selected = row$category)
+    updateSelectInput(session, "tpl_mode", selected = row$mode)
+    updateSelectInput(session, "tpl_unit", selected = row$unit)
+    updateTextAreaInput(session, "tpl_note", value = row$note)
+  })
+
+  observeEvent(input$tpl_add_or_update, {
+    rv$templates_error_text <- NULL
+    nm <- trimws(input$tpl_name)
+    if (!nzchar(nm)) {
+      rv$templates_error_text <- "Template name is required."
+      return()
+    }
+
+    is_new <- is.na(rv$editing_template_id)
+    tpl_id <- if (is_new) rv$next_template_id else rv$editing_template_id
+    prev <- rv$template_registry %>% filter(id == tpl_id)
+    prev_default <- if (nrow(prev) == 1) isTRUE(prev$is_default) else FALSE
+
+    dup <- rv$template_registry %>% filter(!is_deleted, id != tpl_id, tolower(name) == tolower(nm))
+    if (nrow(dup) > 0) {
+      rv$templates_error_text <- "Template name already exists."
+      return()
+    }
+
+    new_tpl <- tibble(
+      id = as.integer(tpl_id),
+      name = nm,
+      category = ifelse(is.null(input$tpl_category), "", input$tpl_category),
+      center = "",
+      mode = input$tpl_mode,
+      unit = input$tpl_unit,
+      constant_expr = "0",
+      function_expr = "rep(0, n)",
+      fte = NA_real_,
+      note = input$tpl_note,
+      values = list(numeric()),
+      duration_years = NA_real_,
+      is_default = prev_default,
+      is_deleted = FALSE
+    )
+
+    rv$template_registry <- rv$template_registry %>% filter(id != tpl_id) %>% bind_rows(new_tpl)
+    if (is_new) rv$next_template_id <- rv$next_template_id + 1L
+    rv$editing_template_id <- NA_integer_
+    updateTextInput(session, "tpl_name", value = "")
+    updateSelectInput(session, "tpl_category", selected = "")
+    updateSelectInput(session, "tpl_mode", selected = "constant")
+    updateSelectInput(session, "tpl_unit", selected = "month")
+    updateTextAreaInput(session, "tpl_note", value = "")
+    set_success(if (is_new) paste("Template added:", nm) else paste("Template updated:", nm))
+  })
+
+  observeEvent(input$tpl_delete_selected, {
+    tpl_id <- selected_template_id()
+    req(!is.na(tpl_id))
+    rv$template_registry <- rv$template_registry %>% mutate(is_deleted = if_else(id == tpl_id, TRUE, is_deleted))
+    rv$editing_template_id <- NA_integer_
+    set_success("Template deleted.")
+  })
+
+  observeEvent(input$tpl_clear_all, {
+    showModal(modalDialog(
+      title = "Confirm Clear All Templates",
+      "Are you sure? This will delete all templates (including defaults).",
+      footer = tagList(actionButton("tpl_clear_confirm", "Confirm", class = "btn-danger"), modalButton("Cancel"))
+    ))
+  })
+
+  observeEvent(input$tpl_clear_confirm, {
+    rv$template_registry <- rv$template_registry %>% mutate(is_deleted = TRUE)
+    rv$editing_template_id <- NA_integer_
+    removeModal()
+    set_success("All templates cleared.")
+  })
+
+  observeEvent(input$restore_default_templates, {
+    defaults <- make_default_templates()
+    rv$template_registry <- defaults
+    rv$next_template_id <- max(defaults$id, na.rm = TRUE) + 1L
+    set_success("Default templates restored.")
+  })
+
   observeEvent(input$apply_template, {
-    tpl <- post_templates[[input$template_name]]
-    req(!is.null(tpl))
+    tpl <- rv$template_registry %>% filter(!is_deleted, name == input$template_name) %>% slice(1)
+    req(nrow(tpl) == 1)
 
-    rv$constant_expr_draft <- tpl$ConstantExpr
-    rv$function_expr_draft <- tpl$FunctionExpr
+    rv$constant_expr_draft <- tpl$constant_expr
+    rv$function_expr_draft <- tpl$function_expr
 
-    updateTextInput(session, "center", value = tpl$Center)
-    updateSelectInput(session, "category", selected = tpl$Category)
-    updateSelectInput(session, "value_mode", selected = tpl$Mode)
-    updateSelectInput(session, "value_unit", selected = tpl$Unit)
-    updateTextInput(session, "constant_expr", value = tpl$ConstantExpr)
-    updateTextInput(session, "function_expr", value = tpl$FunctionExpr)
-    updateNumericInput(session, "fte", value = tpl$FTE)
-    updateTextAreaInput(session, "note", value = tpl$Note)
+    updateTextInput(session, "center", value = tpl$center)
+    updateSelectInput(session, "category", selected = tpl$category)
+    updateSelectInput(session, "value_mode", selected = tpl$mode)
+    updateSelectInput(session, "value_unit", selected = tpl$unit)
+    updateTextInput(session, "constant_expr", value = tpl$constant_expr)
+    updateTextInput(session, "function_expr", value = tpl$function_expr)
+    updateNumericInput(session, "fte", value = tpl$fte)
+    updateTextAreaInput(session, "note", value = tpl$note)
 
-    if (!is.null(tpl$DurationYears)) {
+    if (!is.na(tpl$duration_years)) {
       updateDateInput(session, "post_start", value = input$budget_start)
-      updateDateInput(
-        session,
-        "post_end",
-        value = input$budget_start %m+% years(tpl$DurationYears) - days(1)
-      )
+      updateDateInput(session, "post_end", value = input$budget_start %m+% years(as.integer(tpl$duration_years)) - days(1))
     } else {
       updateDateInput(session, "post_start", value = input$budget_start)
       updateDateInput(session, "post_end", value = input$budget_end)
     }
 
-    if (!is.null(tpl$Values)) {
-      rv$variable_defaults <- tpl$Values
-    } else {
-      rv$variable_defaults <- numeric()
-    }
-
+    vals <- tpl$values[[1]]
+    rv$variable_defaults <- if (is.null(vals)) numeric() else as.numeric(vals)
     set_success(paste("Template applied:", input$template_name))
   })
 
@@ -1037,7 +1667,7 @@ server <- function(input, output, session) {
       )
     } else if (mode == "function") {
       tagList(
-        textInput("function_expr", "Amount formula expression", value = rv$function_expr_draft, placeholder = "Expression using n, FTE, salaries[...] and inflation helpers"),
+        textInput("function_expr", "Amount formula expression", value = rv$function_expr_draft, placeholder = "Expression using n, FTE, salary_identifier$total_m and inflation helpers"),
         actionButton("show_formula_help", "Help: available formula variables")
       )
     } else {
@@ -1067,7 +1697,7 @@ server <- function(input, output, session) {
 
     map_dfr(seq_len(nrow(rv$posts)), function(i) {
       row <- rv$posts[i, ]
-      total <- tryCatch(post_total(row, all_posts_tbl = rv$posts, salaries_lookup = salaries_lookup, inflation_pct = input$inflation_pct), error = function(e) NA_real_)
+      total <- tryCatch(post_total(row, all_posts_tbl = rv$posts, salaries_lookup = salaries_lookup, inflation_pct = input$inflation_pct, salaries_tbl = rv$salaries), error = function(e) NA_real_)
       tibble(
         id = row$id,
         center = row$center,
@@ -1110,7 +1740,7 @@ server <- function(input, output, session) {
       }
 
       salaries_lookup <- make_salary_lookup(rv$salaries)
-      long <- build_long_budget(rv$posts, input$budget_start, input$budget_end, salaries_lookup = salaries_lookup, inflation_pct = input$inflation_pct)
+      long <- build_long_budget(rv$posts, input$budget_start, input$budget_end, salaries_lookup = salaries_lookup, inflation_pct = input$inflation_pct, salaries_tbl = rv$salaries)
       if (!nrow(long)) {
         return(tibble(
           id = integer(),
@@ -1373,7 +2003,8 @@ server <- function(input, output, session) {
         new_row,
         salaries_lookup = make_salary_lookup(rv$salaries),
         inflation_pct = input$inflation_pct,
-        fte_monthly_total = row_fte_monthly_total
+        fte_monthly_total = row_fte_monthly_total,
+        salaries_tbl = rv$salaries
       ))
       TRUE
     }, error = function(e) {
@@ -1409,10 +2040,11 @@ server <- function(input, output, session) {
 
   output$export_control <- renderUI({
     n_flagged <- sum(rv$posts$needs_amendment, na.rm = TRUE)
+    export_name <- ifelse(nzchar(rv$workbook_name), rv$workbook_name, "Budget")
     if (n_flagged > 0) {
       actionButton("export_xlsx", "Export blocked: amend posts first", class = "btn-warning")
     } else {
-      actionButton("export_xlsx", "Export Budget.xlsx", class = "btn-primary")
+      actionButton("export_xlsx", paste0("Export ", export_name, ".xlsx"), class = "btn-primary")
     }
   })
 
@@ -1436,14 +2068,14 @@ server <- function(input, output, session) {
       ),
       tags$p("Salary references:"),
       tags$ul(
-        tags$li(tags$b("salaries"), " - lookup table indexed by identifier and selector"),
-        tags$li("Identifiers: s1, s2, s3, ..."),
+        tags$li("Each salary identifier is available as an object, e.g. phd_student$total_m"),
+        tags$li("Identifiers are generated from salary names and made unique"),
         tags$li("Monthly selectors: base_m, pension_m, own_pension_m, holiday_base_m, holiday_m, total_m, total_holidays_deducted_m"),
         tags$li("Yearly selectors: base_y, pension_y, own_pension_y, holiday_base_y, holiday_y, total_y, total_holidays_deducted_y"),
-        tags$li("Backwards compatible selectors: base, pension, own_pension, holiday_base, holiday, total, total_holidays_deducted (monthly)")
+        tags$li("Legacy lookup object salaries[identifier, \"total_m\"] remains available for older formulas")
       ),
       tags$p("Examples:"),
-      tags$pre("apply_inflation_month(salaries[s1, \"total_m\"])")
+      tags$pre("apply_inflation_month(phd_student$total_m)")
     ))
   })
 
@@ -1467,7 +2099,8 @@ server <- function(input, output, session) {
       input$budget_start,
       input$budget_end,
       salaries_lookup = make_salary_lookup(rv$salaries),
-      inflation_pct = input$inflation_pct
+      inflation_pct = input$inflation_pct,
+      salaries_tbl = rv$salaries
     )
     if (!nrow(long)) {
       return(tibble(
@@ -1556,24 +2189,42 @@ server <- function(input, output, session) {
       return()
     }
 
+    # Issue #3: Use workbook name for filename
+    export_filename <- paste0(rv$workbook_name, ".xlsx")
+    
+    # Issue #4: Generate salary identifiers for existing salaries
+    salary_identifiers <- character()
+    if (nrow(rv$salaries) > 0) {
+      for (i in seq_len(nrow(rv$salaries))) {
+        if (is.na(rv$salaries$identifier[i]) || !nzchar(rv$salaries$identifier[i])) {
+          salary_identifiers[i] <- generate_salary_identifier(rv$salaries$name[i], salary_identifiers)
+        } else {
+          salary_identifiers[i] <- rv$salaries$identifier[i]
+        }
+      }
+      rv$salaries$identifier <- salary_identifiers
+    }
+
     sheets <- list(
       by_month = to_js_rows(build_export_sheet("month")),
       by_calendar_year = to_js_rows(build_export_sheet("calendar_year")),
       by_project_year = to_js_rows(build_export_sheet("project_year")),
       posts = to_js_rows(serialize_posts(rv$posts)),
       salaries = to_js_rows(serialize_salaries(rv$salaries)),
+      categories = to_js_rows(rv$category_registry),
+      templates = to_js_rows(rv$template_registry),
       meta = to_js_rows(tibble(
-        key = c("budget_start", "budget_end", "inflation_pct"),
-        value = c(as.character(input$budget_start), as.character(input$budget_end), as.character(input$inflation_pct))
+        key = c("budget_start", "budget_end", "inflation_pct", "workbook_name", "schema_version"),
+        value = c(as.character(input$budget_start), as.character(input$budget_end), as.character(input$inflation_pct), rv$workbook_name, "2.0")
       ))
     )
 
     session$sendCustomMessage("download-xlsx", list(
-      filename = "Budget_builder.xlsx",
+      filename = export_filename,
       sheets = sheets
     ))
 
-    set_success("Export started: Budget_builder.xlsx")
+    set_success(paste("Export started:", export_filename))
   })
 
   observeEvent(input$import_file, {
@@ -1604,6 +2255,7 @@ server <- function(input, output, session) {
       start_val <- imported_meta$value[imported_meta$key == "budget_start"]
       end_val <- imported_meta$value[imported_meta$key == "budget_end"]
       inflation_val <- imported_meta$value[imported_meta$key == "inflation_pct"]
+      workbook_name_val <- imported_meta$value[imported_meta$key == "workbook_name"]
 
       if (length(start_val) != 1 || length(end_val) != 1) {
         stop("Meta sheet must contain one budget_start and one budget_end.")
@@ -1617,17 +2269,87 @@ server <- function(input, output, session) {
         salaries_parsed <- parse_salaries(as_tibble(imported_salaries))
       }
 
+      # Issue #3: Restore workbook name
+      if (length(workbook_name_val) == 1 && !is.na(workbook_name_val) && nzchar(workbook_name_val)) {
+        restored_workbook_name <- workbook_name_val
+      } else {
+        # Fall back to filename
+        restored_workbook_name <- workbook_name_from_filename(input$import_file$name)
+      }
+
+      # Issue #2: Restore categories and templates
+      category_registry_restored <- make_default_categories()
+      if ("categories" %in% sheets) {
+        imported_categories <- readxl::read_excel(path, sheet = "categories", col_types = "text")
+        category_registry_restored <- as_tibble(imported_categories)
+        if (!all(c("id", "name", "operator", "amount", "per_unit", "is_default", "is_deleted") %in% names(category_registry_restored))) {
+          category_registry_restored <- make_default_categories()
+        } else {
+          category_registry_restored <- category_registry_restored %>%
+            mutate(
+              id = suppressWarnings(as.integer(id)),
+              name = as.character(name),
+              operator = as.character(operator),
+              amount = suppressWarnings(as.numeric(amount)),
+              per_unit = as.character(per_unit),
+              is_default = as.logical(is_default),
+              is_deleted = as.logical(is_deleted)
+            )
+        }
+      }
+
+      template_registry_restored <- make_default_templates()
+      if ("templates" %in% sheets) {
+        imported_templates <- readxl::read_excel(path, sheet = "templates", col_types = "text")
+        template_registry_restored <- as_tibble(imported_templates)
+        if (!all(c("id", "name", "category", "center", "mode", "unit", "constant_expr", "function_expr", "fte", "note", "values", "duration_years", "is_default", "is_deleted") %in% names(template_registry_restored))) {
+          template_registry_restored <- make_default_templates()
+        } else {
+          template_registry_restored <- template_registry_restored %>%
+            mutate(
+              id = suppressWarnings(as.integer(id)),
+              name = as.character(name),
+              category = as.character(category),
+              center = as.character(center),
+              mode = as.character(mode),
+              unit = as.character(unit),
+              constant_expr = as.character(constant_expr),
+              function_expr = as.character(function_expr),
+              fte = suppressWarnings(as.numeric(fte)),
+              note = as.character(note),
+              values = strsplit(ifelse(is.na(values), "", values), ";", fixed = TRUE),
+              values = map(values, ~ as.numeric(.x[nzchar(.x)])),
+              duration_years = suppressWarnings(as.numeric(duration_years)),
+              is_default = as.logical(is_default),
+              is_deleted = as.logical(is_deleted)
+            )
+        }
+      }
+
       updateDateInput(session, "budget_start", value = as.Date(start_val))
       updateDateInput(session, "budget_end", value = as.Date(end_val))
+      updateTextInput(session, "workbook_name", value = restored_workbook_name)
       if (length(inflation_val) == 1 && !is.na(suppressWarnings(as.numeric(inflation_val)))) {
         updateNumericInput(session, "inflation_pct", value = as.numeric(inflation_val))
       }
 
+      rv$workbook_name <- restored_workbook_name
       rv$posts <- posts_parsed
       rv$next_id <- ifelse(nrow(posts_parsed), max(posts_parsed$id, na.rm = TRUE) + 1L, 1L)
       rv$posts <- flag_posts(rv$posts, as.Date(start_val), as.Date(end_val))
       rv$salaries <- salaries_parsed
       rv$next_salary_id <- ifelse(nrow(salaries_parsed), max(salaries_parsed$id, na.rm = TRUE) + 1L, 1L)
+      
+      # Issue #2, #4: Restore settings
+      rv$category_registry <- category_registry_restored
+      max_cat_id <- suppressWarnings(max(as.integer(category_registry_restored$id), na.rm = TRUE))
+      if (!is.finite(max_cat_id)) max_cat_id <- 18L
+      rv$next_category_id <- as.integer(max_cat_id) + 1L
+      rv$template_registry <- template_registry_restored
+      max_tpl_id <- suppressWarnings(max(as.integer(template_registry_restored$id), na.rm = TRUE))
+      if (!is.finite(max_tpl_id)) max_tpl_id <- 4L
+      rv$next_template_id <- as.integer(max_tpl_id) + 1L
+      
       TRUE
     }, error = function(e) {
       show_error_modal(paste("Import failed:", e$message))
