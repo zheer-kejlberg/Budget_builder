@@ -296,7 +296,7 @@ expand_year_values <- function(values, n_months) {
 sanitize_workbook_name <- function(name) {
   if (is.null(name) || !nzchar(trimws(name))) return("")
   # Allow letters, numbers, spaces, dash, underscore, parentheses
-  sanitized <- gsub("[^a-zA-Z0-9 _\\-().]", "", trimws(name))
+  sanitized <- gsub("[^A-Za-z0-9 _.()-]", "", trimws(name), perl = TRUE)
   substring(sanitized, 1, 80)
 }
 
@@ -866,7 +866,7 @@ ui <- fluidPage(
     }
     .btn {
       padding: 0.8rem 1.2rem !important;
-      margin: 10px 0 0 12px;
+      margin: 0 0 10px 0;
     }
     .inline-error {
       color: #b00020;
@@ -886,6 +886,13 @@ ui <- fluidPage(
       padding: 10px 0 10px;
       font-weight: 500;
       text-decoration-line: underline;
+    }
+    .settings-tab .btn {
+      width: 100% !important;
+    }
+    .shiny-input-container .input-group .form-control,
+    .shiny-input-container .input-group .input-group-btn .btn {
+      height: 38px !important;
     }
     "
   ))),
@@ -911,8 +918,10 @@ ui <- fluidPage(
   ))),
   tags$head(tags$script(HTML(
     "
-    $(document).on('input', '#workbook_name', function() {
-      Shiny.setInputValue('workbook_name_live', this.value, {priority: 'event'});
+    document.addEventListener('input', function(evt) {
+      if (evt.target && evt.target.id === 'workbook_name' && window.Shiny && Shiny.setInputValue) {
+        Shiny.setInputValue('workbook_name_live', evt.target.value, {priority: 'event'});
+      }
     });
     "
   ))),
@@ -1042,6 +1051,7 @@ ui <- fluidPage(
         # Issue #2: Categories and Templates settings tab
         tabPanel(
           "Categories & Templates",
+          tags$div(class = "settings-tab",
           h4("Manage Categories"),
           fluidRow(
             column(12,
@@ -1055,12 +1065,13 @@ ui <- fluidPage(
               ),
               tags$div(style = "margin: 4px 0 10px; color: #555;", "Operators define the rule, Amount is the threshold, and Per says whether the threshold applies to each month, each calendar year, or each project year."),
               fluidRow(
-                column(6, actionButton("cat_add", "Add", class = "btn-primary", style = "margin-right: 12px;")),
-                column(6, actionButton("cat_edit_selected", "Edit"))
+                column(4, actionButton("cat_add", "Add", class = "btn-primary")),
+                column(4, actionButton("cat_edit_selected", "Edit")),
+                column(4, tags$div())
               ),
               fluidRow(
-                column(4, actionButton("cat_delete_selected", "Delete Category", class = "btn-danger", style = "margin-right: 12px;")),
-                column(4, actionButton("cat_clear_all", "Clear All Categories", class = "btn-warning", style = "margin-right: 12px;")),
+                column(4, actionButton("cat_delete_selected", "Delete Category", class = "btn-danger")),
+                column(4, actionButton("cat_clear_all", "Clear All Categories", class = "btn-warning")),
                 column(4, uiOutput("restore_categories_control"))
               ),
               uiOutput("categories_error")
@@ -1082,16 +1093,18 @@ ui <- fluidPage(
                 column(12, textAreaInput("tpl_note", "Note", rows = 2))
               ),
               fluidRow(
-                column(6, actionButton("tpl_add", "Add", class = "btn-primary", style = "margin-right: 12px;")),
-                column(6, actionButton("tpl_edit_selected", "Edit"))
+                column(4, actionButton("tpl_add", "Add", class = "btn-primary")),
+                column(4, actionButton("tpl_edit_selected", "Edit")),
+                column(4, tags$div())
               ),
               fluidRow(
-                column(4, actionButton("tpl_delete_selected", "Delete Template", class = "btn-danger", style = "margin-right: 12px;")),
-                column(4, actionButton("tpl_clear_all", "Clear All Templates", class = "btn-warning", style = "margin-right: 12px;")),
+                column(4, actionButton("tpl_delete_selected", "Delete Template", class = "btn-danger")),
+                column(4, actionButton("tpl_clear_all", "Clear All Templates", class = "btn-warning")),
                 column(4, uiOutput("restore_templates_control"))
               ),
               uiOutput("templates_error")
             )
+          )
           )
         )
       )
@@ -1497,6 +1510,14 @@ server <- function(input, output, session) {
     }
   }, ignoreInit = TRUE)
 
+  workbook_name_effective <- reactive({
+    live_name <- if (!is.null(input$workbook_name_live)) input$workbook_name_live else ""
+    typed_name <- if (!is.null(input$workbook_name)) input$workbook_name else ""
+    preferred <- if (nzchar(trimws(live_name))) live_name else typed_name
+    if (!nzchar(trimws(preferred))) preferred <- rv$workbook_name
+    sanitize_workbook_name(preferred)
+  })
+
   # Keep category/template selectors synchronized with registries
   observe({
     active_categories <- rv$category_registry %>% filter(!is_deleted) %>% pull(name)
@@ -1513,7 +1534,7 @@ server <- function(input, output, session) {
   output$restore_categories_control <- renderUI({
     has_deleted_defaults <- nrow(rv$category_registry) > 0 && any(rv$category_registry$is_default & !rv$category_registry$is_locked & rv$category_registry$is_deleted)
     if (!has_deleted_defaults) return(NULL)
-    actionButton("restore_default_categories", "Restore Default Categories", class = "btn-success", style = "margin-left: 12px;")
+    actionButton("restore_default_categories", "Restore Default Categories", class = "btn-success")
   })
 
   output$restore_templates_control <- renderUI({
@@ -2136,8 +2157,7 @@ server <- function(input, output, session) {
         category_row = category_row,
         budget_start = as.Date(input$budget_start)
       )
-      if (!is.null(category_msg)) return(category_msg)
-      TRUE
+      if (!is.null(category_msg)) category_msg else TRUE
     }, error = function(e) {
       rv$form_error_text <- e$message
       FALSE
@@ -2211,7 +2231,7 @@ server <- function(input, output, session) {
 
   output$export_control <- renderUI({
     n_flagged <- sum(rv$posts$needs_amendment, na.rm = TRUE)
-    export_name <- ifelse(nzchar(rv$workbook_name), rv$workbook_name, "Budget")
+    export_name <- ifelse(nzchar(workbook_name_effective()), workbook_name_effective(), "Budget")
     if (n_flagged > 0) {
       actionButton("export_xlsx", "Export blocked: amend posts first", class = "btn-warning")
     } else {
@@ -2360,8 +2380,18 @@ server <- function(input, output, session) {
       return()
     }
 
+    export_base_name <- workbook_name_effective()
+    name_error <- validate_workbook_name(export_base_name)
+    if (!is.null(name_error)) {
+      rv$workbook_name_error <- name_error
+      rv$export_error_text <- "Workbook name must be valid before export."
+      return()
+    }
+    rv$workbook_name <- export_base_name
+    rv$workbook_name_error <- NULL
+
     # Issue #3: Use workbook name for filename
-    export_filename <- paste0(rv$workbook_name, ".xlsx")
+    export_filename <- paste0(export_base_name, ".xlsx")
     
     # Issue #4: Generate salary identifiers for existing salaries
     salary_identifiers <- character()
@@ -2386,7 +2416,7 @@ server <- function(input, output, session) {
       templates = to_js_rows(serialize_templates(rv$template_registry)),
       meta = to_js_rows(tibble(
         key = c("budget_start", "budget_end", "inflation_pct", "workbook_name", "schema_version"),
-        value = c(as.character(input$budget_start), as.character(input$budget_end), as.character(input$inflation_pct), rv$workbook_name, "2.0")
+        value = c(as.character(input$budget_start), as.character(input$budget_end), as.character(input$inflation_pct), export_base_name, "2.0")
       ))
     )
 
