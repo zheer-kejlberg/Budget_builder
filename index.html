@@ -256,6 +256,16 @@ make_default_categories &lt;- function() {
   )
 }
 
+make_default_sites &lt;- function() {
+  tibble(
+    id = 1L,
+    name = "Main",
+    is_default = TRUE,
+    is_locked = TRUE,
+    is_deleted = FALSE
+  )
+}
+
 calc_salary_fields &lt;- function(base_salary, unit, pension_mode, pension_value, own_pension_pct) {
   base_input &lt;- as.numeric(base_salary)
   own_pct &lt;- as.numeric(own_pension_pct)
@@ -562,6 +572,35 @@ find_posts_with_deleted_category &lt;- function(posts_tbl, category_registry) {
     pull(id)
 }
 
+find_posts_with_deleted_site &lt;- function(posts_tbl, site_registry) {
+  if (!nrow(posts_tbl) || !nrow(site_registry)) return(integer())
+  deleted_sites &lt;- site_registry %&gt;%
+    filter(is_deleted) %&gt;%
+    pull(name)
+  posts_tbl %&gt;%
+    filter(center %in% deleted_sites) %&gt;%
+    pull(id)
+}
+
+get_post_amendment_fields &lt;- function(post_row, budget_start, budget_end, category_registry, site_registry) {
+  fields &lt;- character(0)
+
+  if (post_row$start_date &lt; budget_start) fields &lt;- c(fields, "post_start")
+  if (post_row$end_date &gt; budget_end) fields &lt;- c(fields, "post_end")
+
+  bad_category &lt;- category_registry %&gt;%
+    filter(name == post_row$category, is_deleted) %&gt;%
+    nrow() &gt; 0
+  if (bad_category) fields &lt;- c(fields, "category")
+
+  bad_site &lt;- site_registry %&gt;%
+    filter(name == post_row$center, is_deleted) %&gt;%
+    nrow() &gt; 0
+  if (bad_site) fields &lt;- c(fields, "center")
+
+  unique(fields)
+}
+
 resolve_post_values &lt;- function(post_row, salaries_lookup = data.frame(), inflation_pct = 0, fte_monthly_total = NULL, salaries_tbl = NULL) {
   months &lt;- month_sequence(post_row$start_date, post_row$end_date)
   n_months &lt;- length(months)
@@ -614,13 +653,15 @@ resolve_post_values &lt;- function(post_row, salaries_lookup = data.frame(), inf
   }
 
   if (mode == "constant") {
-    scalar &lt;- safe_eval_expr(post_row$constant_expr, fte = fte, n = n_months, extra_env = extra_env)
+    constant_expr_safe &lt;- if (is.null(post_row$constant_expr) || !nzchar(trimws(post_row$constant_expr))) "0" else post_row$constant_expr
+    scalar &lt;- safe_eval_expr(constant_expr_safe, fte = fte, n = n_months, extra_env = extra_env)
     if (length(scalar) != 1L || !is.numeric(scalar) || is.na(scalar)) {
       stop("Constant amount expression must resolve to one numeric value.", call. = FALSE)
     }
     values &lt;- rep(as.numeric(scalar), if (unit == "month") n_months else n_years)
   } else if (mode == "function") {
-    values &lt;- safe_eval_expr(post_row$function_expr, fte = fte, n = n_months, extra_env = extra_env)
+    function_expr_safe &lt;- if (is.null(post_row$function_expr) || !nzchar(trimws(post_row$function_expr))) "rep(0, n)" else post_row$function_expr
+    values &lt;- safe_eval_expr(function_expr_safe, fte = fte, n = n_months, extra_env = extra_env)
     if (!is.numeric(values)) {
       stop("Amount formula must resolve to numeric values.", call. = FALSE)
     }
@@ -747,6 +788,10 @@ serialize_posts &lt;- function(posts_tbl) {
 }
 
 parse_posts &lt;- function(posts_tbl) {
+  if (is.null(posts_tbl) || !nrow(posts_tbl)) {
+    return(make_empty_posts())
+  }
+
   required &lt;- c(
     "id", "center", "post_name", "category", "start_date", "end_date",
     "fte", "value_mode", "value_unit", "constant_expr", "function_expr",
@@ -754,7 +799,26 @@ parse_posts &lt;- function(posts_tbl) {
   )
 
   if (!all(required %in% names(posts_tbl))) {
-    stop("Imported posts sheet is missing required columns.", call. = FALSE)
+    missing_cols &lt;- setdiff(required, names(posts_tbl))
+    for (col in missing_cols) {
+      posts_tbl[[col]] &lt;- switch(col,
+        id = NA_integer_,
+        center = "",
+        post_name = "",
+        category = "",
+        start_date = as.character(NA),
+        end_date = as.character(NA),
+        fte = NA_real_,
+        value_mode = "constant",
+        value_unit = "month",
+        constant_expr = "0",
+        function_expr = "rep(0, n)",
+        value_vector = "",
+        note = "",
+        needs_amendment = FALSE,
+        ""
+      )
+    }
   }
 
   posts_tbl %&gt;%
@@ -775,6 +839,7 @@ serialize_salaries &lt;- function(salaries_tbl) {
 
 serialize_categories &lt;- function(categories_tbl) {
   categories_tbl %&gt;%
+    filter(!(is_deleted &amp; !is_default)) %&gt;%
     mutate(
       id = as.integer(id),
       name = as.character(name),
@@ -785,6 +850,43 @@ serialize_categories &lt;- function(categories_tbl) {
       is_locked = as.logical(is_locked),
       is_deleted = as.logical(is_deleted)
     )
+}
+
+serialize_sites &lt;- function(sites_tbl) {
+  sites_tbl %&gt;%
+    filter(!(is_deleted &amp; !is_default)) %&gt;%
+    mutate(
+      id = as.integer(id),
+      name = as.character(name),
+      is_default = as.logical(is_default),
+      is_locked = as.logical(is_locked),
+      is_deleted = as.logical(is_deleted)
+    )
+}
+
+parse_sites &lt;- function(sites_tbl) {
+  required &lt;- c("id", "name", "is_default", "is_deleted")
+  if (is.null(sites_tbl) || !nrow(sites_tbl) || !all(required %in% names(sites_tbl))) {
+    return(make_default_sites())
+  }
+
+  parsed &lt;- sites_tbl
+  if (!"is_locked" %in% names(parsed)) {
+    parsed$is_locked &lt;- FALSE
+  }
+  parsed &lt;- parsed %&gt;%
+    mutate(
+      id = suppressWarnings(as.integer(id)),
+      name = as.character(name),
+      is_default = as.logical(is_default),
+      is_locked = as.logical(is_locked),
+      is_deleted = as.logical(is_deleted)
+    )
+
+  if (!any(parsed$is_locked &amp; !parsed$is_deleted, na.rm = TRUE)) {
+    parsed &lt;- bind_rows(make_default_sites(), parsed)
+  }
+  parsed
 }
 
 parse_categories &lt;- function(categories_tbl) {
@@ -817,6 +919,7 @@ parse_categories &lt;- function(categories_tbl) {
 
 serialize_templates &lt;- function(templates_tbl) {
   templates_tbl %&gt;%
+    filter(!(is_deleted &amp; !is_default)) %&gt;%
     mutate(
       id = as.integer(id),
       name = as.character(name),
@@ -950,6 +1053,21 @@ append_total_row &lt;- function(df, amount_col = "amount") {
   bind_rows(df, total_row)
 }
 
+amend_label &lt;- function(text, show_amend = FALSE, required = FALSE) {
+  tagList(
+    if (required) tags$span(style = "color:#b00020;font-weight:400;", "*"),
+    text,
+    tags$span(
+      style = if (show_amend) "color:#b00020;font-weight:700;font-size:large;" else "display:none;visibility:hidden;",
+      " !!!"
+    )
+  )
+}
+
+required_label &lt;- function(text) {
+  amend_label(text, show_amend = FALSE, required = TRUE)
+}
+
 ui &lt;- fluidPage(
   tags$head(tags$style(HTML(
     "
@@ -986,6 +1104,21 @@ ui &lt;- fluidPage(
     .shiny-input-container .input-group .input-group-btn .btn {
       height: 38px !important;
     }
+    .nav-tabs &gt; li {
+      width: 33.33%;
+      text-align: center;
+    }
+    .nav-tabs &gt; li &gt; a {
+      text-align: center;
+    }
+    .tab-content {
+      margin-top: 30px;
+    }
+    .amend-badge {
+      color: #b00020;
+      font-weight: 700;
+      margin-left: 4px;
+    }
     "
   ))),
   tags$head(tags$script(src = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js")),
@@ -1015,6 +1148,8 @@ ui &lt;- fluidPage(
         Shiny.setInputValue('workbook_name_live', evt.target.value, {priority: 'event'});
       }
     });
+
+    
     "
   ))),
   # Issue #3: Workbook name header
@@ -1042,11 +1177,11 @@ ui &lt;- fluidPage(
       h4("2) Add or edit post"),
       selectInput("template_name", "Template", choices = make_default_templates()$name, selected = "Custom"),
       actionButton("apply_template", "Apply template"),
-      textInput("post_name", "Post name"),
-      textInput("center", "Center", value = ""),
-      selectInput("category", "Category", choices = c("", make_default_categories()$name), selected = ""),
-      dateInput("post_start", "Post start"),
-      dateInput("post_end", "Post end"),
+      textInput("post_name", required_label("Post name")),
+      selectInput("center", required_label("Site"), choices = make_default_sites()$name, selected = "Main"),
+      selectInput("category", required_label("Category"), choices = c("", make_default_categories()$name), selected = ""),
+      dateInput("post_start", required_label("Post start")),
+      dateInput("post_end", required_label("Post end")),
       numericInput("fte", "FTE", value = NA_real_, min = 0, step = 0.1),
       selectInput("value_mode", "How should amount be defined?", choices = c("constant", "function", "variable"), selected = "constant"),
       selectInput("value_unit", "Amount frequency", choices = c("month", "year"), selected = "month"),
@@ -1084,8 +1219,8 @@ ui &lt;- fluidPage(
               8,
               checkboxGroupInput(
                 "squash_dims",
-                "Squash by:",
-                choices = c("Period", "Post name", "Center", "Category"),
+                "Collapse by:",
+                choices = c("Period", "Post name", "Site", "Category"),
                 selected = character(0),
                 inline = TRUE
               )
@@ -1094,14 +1229,14 @@ ui &lt;- fluidPage(
           h4("Filter by:"),
           fluidRow(
             column(3, selectizeInput("filter_name", "Post name", choices = character(0), multiple = TRUE)),
-            column(3, selectizeInput("filter_center", "Center", choices = character(0), multiple = TRUE)),
+            column(3, selectizeInput("filter_center", "Site", choices = character(0), multiple = TRUE)),
             column(3, selectizeInput("filter_category", "Category", choices = character(0), multiple = TRUE)),
             column(3, dateRangeInput("filter_month_range", "Active month range (inclusive)", start = start_default, end = end_default, format = "yyyy-mm"))
           ),
           fluidRow(
             column(3, numericInput("filter_amount_min", "Min amount", value = 0)),
             column(3, numericInput("filter_amount_max", "Max amount", value = 10000000)),
-            column(6, textInput("filter_text", "Free-text search", value = "", placeholder = "Search in period, post name, center, category"))
+            column(6, textInput("filter_text", "Free-text search", value = "", placeholder = "Search in period, post name, site, category"))
           ),
           DTOutput("posts_table"),
           br(),
@@ -1144,6 +1279,29 @@ ui &lt;- fluidPage(
         tabPanel(
           "Categories &amp; Templates",
           tags$div(class = "settings-tab",
+          h4("Manage Sites"),
+          fluidRow(
+            column(12,
+              DTOutput("sites_table"),
+              br(),
+              fluidRow(
+                column(6, textInput("site_name", "Name")),
+                column(6, tags$div())
+              ),
+              fluidRow(
+                column(4, actionButton("site_add", "Add", class = "btn-primary")),
+                column(4, actionButton("site_edit_selected", "Edit")),
+                column(4, tags$div())
+              ),
+              fluidRow(
+                column(4, actionButton("site_delete_selected", "Delete Site", class = "btn-danger")),
+                column(4, actionButton("site_clear_all", "Clear All Sites", class = "btn-warning")),
+                column(4, uiOutput("restore_sites_control"))
+              ),
+              uiOutput("sites_error")
+            )
+          ),
+          br(),
           h4("Manage Categories"),
           fluidRow(
             column(12,
@@ -1210,14 +1368,17 @@ server &lt;- function(input, output, session) {
     salaries = make_empty_salaries(),
     workbook_name = "Budget",
     workbook_name_error = NULL,
+    site_registry = make_default_sites(),
     category_registry = make_default_categories(),
     template_registry = make_default_templates(),
+    next_site_id = max(make_default_sites()$id, na.rm = TRUE) + 1L,
     next_category_id = max(make_default_categories()$id, na.rm = TRUE) + 1L,
     next_template_id = 5L,
     next_id = 1L,
     next_salary_id = 1L,
     editing_id = NA_integer_,
     editing_salary_id = NA_integer_,
+    editing_site_id = NA_integer_,
     editing_category_id = NA_integer_,
     editing_template_id = NA_integer_,
     variable_defaults = numeric(),
@@ -1227,10 +1388,12 @@ server &lt;- function(input, output, session) {
     salary_error_text = NULL,
     budget_error_text = NULL,
     export_error_text = NULL,
+    sites_error_text = NULL,
     categories_error_text = NULL,
     templates_error_text = NULL,
     settings_error_text = NULL,
     pending_post_row = NULL,
+    amend_fields = character(),
     success_text = NULL,
     success_at = NULL
   )
@@ -1249,13 +1412,26 @@ server &lt;- function(input, output, session) {
     rv$success_at &lt;- Sys.time()
   }
 
+  is_amended_field &lt;- function(field_id) {
+    field_id %in% rv$amend_fields
+  }
+
+  refresh_post_field_labels &lt;- function() {
+    updateTextInput(session, "post_name", label = amend_label("Post name", show_amend = is_amended_field("post_name"), required = TRUE))
+    updateSelectInput(session, "center", label = amend_label("Site", show_amend = is_amended_field("center"), required = TRUE))
+    updateSelectInput(session, "category", label = amend_label("Category", show_amend = is_amended_field("category"), required = TRUE))
+    updateDateInput(session, "post_start", label = amend_label("Post start", show_amend = is_amended_field("post_start"), required = TRUE))
+    updateDateInput(session, "post_end", label = amend_label("Post end", show_amend = is_amended_field("post_end"), required = TRUE))
+  }
+
   reset_form &lt;- function() {
     rv$editing_id &lt;- NA_integer_
     rv$variable_defaults &lt;- numeric()
     rv$constant_expr_draft &lt;- "0"
     rv$function_expr_draft &lt;- "rep((510000*FTE)/12, n)"
+    rv$amend_fields &lt;- character(0)
     updateTextInput(session, "post_name", value = "")
-    updateTextInput(session, "center", value = "")
+    updateSelectInput(session, "center", selected = "Main")
     updateSelectInput(session, "category", selected = "")
     updateDateInput(session, "post_start", value = input$budget_start)
     updateDateInput(session, "post_end", value = input$budget_end)
@@ -1265,6 +1441,7 @@ server &lt;- function(input, output, session) {
     updateTextInput(session, "constant_expr", value = "0")
     updateTextInput(session, "function_expr", value = "rep((510000*FTE)/12, n)")
     updateTextAreaInput(session, "note", value = "")
+    refresh_post_field_labels()
   }
 
   output$budget_period_error &lt;- renderUI({
@@ -1297,9 +1474,40 @@ server &lt;- function(input, output, session) {
     tags$div(class = "inline-error", rv$categories_error_text)
   })
 
+  output$sites_error &lt;- renderUI({
+    if (is.null(rv$sites_error_text)) return(NULL)
+    tags$div(class = "inline-error", rv$sites_error_text)
+  })
+
   output$templates_error &lt;- renderUI({
     if (is.null(rv$templates_error_text)) return(NULL)
     tags$div(class = "inline-error", rv$templates_error_text)
+  })
+
+  output$sites_table &lt;- renderDT({
+    site_tbl &lt;- rv$site_registry
+    needed &lt;- c("id", "name", "is_default", "is_locked", "is_deleted")
+    if (!all(needed %in% names(site_tbl))) {
+      site_tbl &lt;- make_default_sites()
+    }
+    site_tbl &lt;- site_tbl %&gt;%
+      mutate(
+        id = suppressWarnings(as.integer(id)),
+        name = as.character(name),
+        is_default = as.logical(is_default),
+        is_locked = as.logical(is_locked),
+        is_deleted = as.logical(is_deleted)
+      )
+
+    datatable(
+      site_tbl %&gt;%
+        filter(!is_deleted) %&gt;%
+        select(name),
+      colnames = c("Name"),
+      selection = "single",
+      rownames = FALSE,
+      options = list(pageLength = 10)
+    )
   })
 
   output$categories_table &lt;- renderDT({
@@ -1610,7 +1818,14 @@ server &lt;- function(input, output, session) {
     sanitize_workbook_name(preferred)
   })
 
-  # Keep category/template selectors synchronized with registries
+  # Keep site/category/template selectors synchronized with registries
+  observe({
+    active_sites &lt;- rv$site_registry %&gt;% filter(!is_deleted) %&gt;% pull(name)
+    selected_site &lt;- if (!is.null(input$center) &amp;&amp; input$center %in% active_sites) input$center else "Main"
+    if (!selected_site %in% active_sites &amp;&amp; length(active_sites) &gt; 0) selected_site &lt;- active_sites[[1]]
+    updateSelectInput(session, "center", choices = active_sites, selected = selected_site)
+  })
+
   observe({
     active_categories &lt;- rv$category_registry %&gt;% filter(!is_deleted) %&gt;% pull(name)
     updateSelectInput(session, "category", choices = c("", active_categories), selected = input$category)
@@ -1629,10 +1844,115 @@ server &lt;- function(input, output, session) {
     actionButton("restore_default_categories", "Restore Default Categories", class = "btn-success")
   })
 
+  output$restore_sites_control &lt;- renderUI({
+    has_deleted_defaults &lt;- nrow(rv$site_registry) &gt; 0 &amp;&amp; any(rv$site_registry$is_default &amp; rv$site_registry$is_deleted)
+    if (!has_deleted_defaults) return(NULL)
+    actionButton("restore_default_sites", "Restore Default Sites", class = "btn-success")
+  })
+
   output$restore_templates_control &lt;- renderUI({
     all_deleted &lt;- nrow(rv$template_registry) &gt; 0 &amp;&amp; all(rv$template_registry$is_deleted)
     if (!all_deleted) return(NULL)
     actionButton("restore_default_templates", "Restore Default Templates", class = "btn-success")
+  })
+
+  selected_site_id &lt;- reactive({
+    sel &lt;- input$sites_table_rows_selected
+    visible_sites &lt;- rv$site_registry %&gt;% filter(!is_deleted)
+    if (!length(sel) || !nrow(visible_sites) || sel &gt; nrow(visible_sites)) return(NA_integer_)
+    visible_sites$id[sel]
+  })
+
+  observeEvent(input$site_edit_selected, {
+    site_id &lt;- selected_site_id()
+    req(!is.na(site_id))
+    row &lt;- rv$site_registry %&gt;% filter(id == site_id)
+    req(nrow(row) == 1)
+    rv$editing_site_id &lt;- site_id
+    updateTextInput(session, "site_name", value = row$name)
+    set_success("Site loaded into fields for editing.")
+  })
+
+  observeEvent(input$site_add, {
+    rv$sites_error_text &lt;- NULL
+    nm &lt;- trimws(input$site_name)
+    if (!nzchar(nm)) {
+      rv$sites_error_text &lt;- "Site name is required."
+      return()
+    }
+
+    is_new &lt;- is.na(rv$editing_site_id)
+    site_id &lt;- if (is_new) rv$next_site_id else rv$editing_site_id
+    prev &lt;- rv$site_registry %&gt;% filter(id == site_id)
+    prev_default &lt;- if (nrow(prev) == 1) isTRUE(prev$is_default) else FALSE
+    prev_locked &lt;- if (nrow(prev) == 1) isTRUE(prev$is_locked) else FALSE
+
+    dup &lt;- rv$site_registry %&gt;%
+      filter(!is_deleted, id != site_id, tolower(name) == tolower(nm))
+    if (nrow(dup) &gt; 0) {
+      rv$sites_error_text &lt;- "Site name already exists."
+      return()
+    }
+
+    new_site &lt;- tibble(
+      id = as.integer(site_id),
+      name = nm,
+      is_default = prev_default,
+      is_locked = prev_locked,
+      is_deleted = FALSE
+    )
+
+    old_name &lt;- if (nrow(prev) == 1) prev$name[[1]] else NULL
+    rv$site_registry &lt;- rv$site_registry %&gt;% filter(id != site_id) %&gt;% bind_rows(new_site)
+    if (is_new) rv$next_site_id &lt;- rv$next_site_id + 1L
+
+    if (!is.null(old_name) &amp;&amp; nzchar(old_name) &amp;&amp; old_name != nm) {
+      rv$posts &lt;- rv$posts %&gt;% mutate(center = if_else(center == old_name, nm, center))
+    }
+
+    rv$editing_site_id &lt;- NA_integer_
+    updateTextInput(session, "site_name", value = "")
+    set_success(if (is_new) paste("Site added:", nm) else paste("Site updated:", nm))
+  })
+
+  observeEvent(input$site_delete_selected, {
+    site_id &lt;- selected_site_id()
+    req(!is.na(site_id))
+    row &lt;- rv$site_registry %&gt;% filter(id == site_id)
+    req(nrow(row) == 1)
+    deleted_site_name &lt;- row$name[[1]]
+    if (isTRUE(row$is_locked[[1]])) {
+      rv$sites_error_text &lt;- "The default site cannot be deleted."
+      return()
+    }
+    rv$site_registry &lt;- rv$site_registry %&gt;% mutate(is_deleted = if_else(id == site_id, TRUE, is_deleted))
+    rv$posts &lt;- rv$posts %&gt;% mutate(needs_amendment = if_else(center == deleted_site_name, TRUE, needs_amendment))
+    rv$editing_site_id &lt;- NA_integer_
+    set_success("Site deleted and posts marked for amendment.")
+  })
+
+  observeEvent(input$site_clear_all, {
+    showModal(modalDialog(
+      title = "Confirm Clear All Sites",
+      "Are you sure? This will delete all sites except Main.",
+      footer = tagList(actionButton("site_clear_confirm", "Confirm", class = "btn-danger"), modalButton("Cancel"))
+    ))
+  })
+
+  observeEvent(input$site_clear_confirm, {
+    active_locked_sites &lt;- rv$site_registry %&gt;% filter(!is_deleted, is_locked) %&gt;% pull(name)
+    rv$site_registry &lt;- rv$site_registry %&gt;% mutate(is_deleted = if_else(is_locked, FALSE, TRUE))
+    rv$posts &lt;- rv$posts %&gt;% mutate(needs_amendment = if_else(!(center %in% active_locked_sites), TRUE, needs_amendment))
+    rv$editing_site_id &lt;- NA_integer_
+    removeModal()
+    set_success("All non-default sites cleared.")
+  })
+
+  observeEvent(input$restore_default_sites, {
+    defaults &lt;- make_default_sites()
+    rv$site_registry &lt;- defaults
+    rv$next_site_id &lt;- max(defaults$id, na.rm = TRUE) + 1L
+    set_success("Default sites restored.")
   })
 
   selected_category_id &lt;- reactive({
@@ -1855,7 +2175,7 @@ server &lt;- function(input, output, session) {
     rv$constant_expr_draft &lt;- tpl$constant_expr
     rv$function_expr_draft &lt;- tpl$function_expr
 
-    updateTextInput(session, "center", value = tpl$center)
+    updateSelectInput(session, "center", selected = tpl$center)
     updateSelectInput(session, "category", selected = tpl$category)
     updateSelectInput(session, "value_mode", selected = tpl$mode)
     updateSelectInput(session, "value_unit", selected = tpl$unit)
@@ -1874,6 +2194,8 @@ server &lt;- function(input, output, session) {
 
     vals &lt;- tpl$values[[1]]
     rv$variable_defaults &lt;- if (is.null(vals)) numeric() else as.numeric(vals)
+    rv$amend_fields &lt;- character(0)
+    refresh_post_field_labels()
     set_success(paste("Template applied:", input$template_name))
   })
 
@@ -1957,7 +2279,7 @@ server &lt;- function(input, output, session) {
           id = integer(),
           Period = character(),
           `Post name` = character(),
-          Center = character(),
+          Site = character(),
           Category = character(),
           Note = character(),
           `Start Date` = as.Date(character()),
@@ -1975,7 +2297,7 @@ server &lt;- function(input, output, session) {
           id = integer(),
           Period = character(),
           `Post name` = character(),
-          Center = character(),
+          Site = character(),
           Category = character(),
           Note = character(),
           `Start Date` = as.Date(character()),
@@ -2004,7 +2326,7 @@ server &lt;- function(input, output, session) {
             TRUE ~ paste0("Project year ", project_year)
           ),
           `Post name` = post_name,
-          Center = center,
+          Site = center,
           Category = category,
           Note = note,
           `Start Date` = start_date,
@@ -2013,14 +2335,14 @@ server &lt;- function(input, output, session) {
           Value = value,
           needs_amendment = needs_amendment
         ) %&gt;%
-        select(id, Period, `Post name`, Center, Category, Note, `Start Date`, `End date`, FTE, Value, needs_amendment)
+        select(id, Period, `Post name`, Site, Category, Note, `Start Date`, `End date`, FTE, Value, needs_amendment)
 
       if (apply_filters) {
         if (!is.null(input$filter_name) &amp;&amp; length(input$filter_name) &gt; 0) {
           out &lt;- out %&gt;% filter(`Post name` %in% input$filter_name)
         }
         if (!is.null(input$filter_center) &amp;&amp; length(input$filter_center) &gt; 0) {
-          out &lt;- out %&gt;% filter(Center %in% input$filter_center)
+          out &lt;- out %&gt;% filter(Site %in% input$filter_center)
         }
         if (!is.null(input$filter_category) &amp;&amp; length(input$filter_category) &gt; 0) {
           out &lt;- out %&gt;% filter(Category %in% input$filter_category)
@@ -2032,14 +2354,14 @@ server &lt;- function(input, output, session) {
 
       if ("Period" %in% squash) out$Period &lt;- "All periods"
       if ("Post name" %in% squash) out$`Post name` &lt;- "All posts"
-      if ("Center" %in% squash) out$Center &lt;- "All centers"
+      if ("Site" %in% squash) out$Site &lt;- "All sites"
       if ("Category" %in% squash) out$Category &lt;- "All categories"
       if ("Post name" %in% squash) out$Note &lt;- "Mixed notes"
 
       group_cols &lt;- c()
       if (!("Period" %in% squash)) group_cols &lt;- c(group_cols, "Period")
       if (!("Post name" %in% squash)) group_cols &lt;- c(group_cols, "Post name")
-      if (!("Center" %in% squash)) group_cols &lt;- c(group_cols, "Center")
+      if (!("Site" %in% squash)) group_cols &lt;- c(group_cols, "Site")
       if (!("Category" %in% squash)) group_cols &lt;- c(group_cols, "Category")
       if (length(group_cols) == 0) group_cols &lt;- "Period"
 
@@ -2048,7 +2370,7 @@ server &lt;- function(input, output, session) {
         summarise(
           Period = if ("Period" %in% group_cols) first(Period) else "All periods",
           `Post name` = if ("Post name" %in% group_cols) first(`Post name`) else "All posts",
-          Center = if ("Center" %in% group_cols) first(Center) else "All centers",
+          Site = if ("Site" %in% group_cols) first(Site) else "All sites",
           Category = if ("Category" %in% group_cols) first(Category) else "All categories",
           Note = if (n_distinct(Note) == 1) first(Note) else "Mixed notes",
           `Start Date` = if (n_distinct(`Start Date`) == 1) first(`Start Date`) else as.Date(NA),
@@ -2073,7 +2395,7 @@ server &lt;- function(input, output, session) {
             filter(
               grepl(txt, tolower(Period), fixed = TRUE) |
                 grepl(txt, tolower(`Post name`), fixed = TRUE) |
-                grepl(txt, tolower(Center), fixed = TRUE) |
+                grepl(txt, tolower(Site), fixed = TRUE) |
                 grepl(txt, tolower(Category), fixed = TRUE) |
                 grepl(txt, tolower(Note), fixed = TRUE)
             )
@@ -2081,8 +2403,8 @@ server &lt;- function(input, output, session) {
       }
 
       out %&gt;%
-        transmute(id, Period, `Post name`, Center, Category, Note, `Start Date`, `End date`, FTE, Amount = Value, needs_amendment) %&gt;%
-        arrange(Center, `Post name`, Period)
+        transmute(id, Period, `Post name`, Site, Category, Note, `Start Date`, `End date`, FTE, Amount = Value, needs_amendment) %&gt;%
+        arrange(Site, `Post name`, Period)
     }
 
     build_display_table(input$period_format, apply_filters = TRUE)
@@ -2143,7 +2465,7 @@ server &lt;- function(input, output, session) {
   rv$function_expr_draft &lt;- row$function_expr
 
     updateTextInput(session, "post_name", value = row$post_name)
-    updateTextInput(session, "center", value = row$center)
+    updateSelectInput(session, "center", selected = row$center)
     updateSelectInput(session, "category", selected = row$category)
     updateDateInput(session, "post_start", value = row$start_date)
     updateDateInput(session, "post_end", value = row$end_date)
@@ -2153,6 +2475,16 @@ server &lt;- function(input, output, session) {
     updateTextInput(session, "constant_expr", value = row$constant_expr)
     updateTextInput(session, "function_expr", value = row$function_expr)
     updateTextAreaInput(session, "note", value = row$note)
+
+    amend_fields &lt;- get_post_amendment_fields(
+      post_row = row,
+      budget_start = as.Date(input$budget_start),
+      budget_end = as.Date(input$budget_end),
+      category_registry = rv$category_registry,
+      site_registry = rv$site_registry
+    )
+    rv$amend_fields &lt;- amend_fields
+    refresh_post_field_labels()
 
     set_success("Post loaded into form for editing.")
   })
@@ -2171,7 +2503,7 @@ server &lt;- function(input, output, session) {
 
     missing_fields &lt;- c()
     if (is.null(input$post_name) || !nzchar(trimws(input$post_name))) missing_fields &lt;- c(missing_fields, "Post name")
-    if (is.null(input$center) || !nzchar(trimws(input$center))) missing_fields &lt;- c(missing_fields, "Center")
+    if (is.null(input$center) || !nzchar(trimws(input$center))) missing_fields &lt;- c(missing_fields, "Site")
     if (is.null(input$category) || !nzchar(trimws(input$category))) missing_fields &lt;- c(missing_fields, "Category")
     if (is.null(input$post_start) || is.na(input$post_start)) missing_fields &lt;- c(missing_fields, "Post start")
     if (is.null(input$post_end) || is.na(input$post_end)) missing_fields &lt;- c(missing_fields, "Post end")
@@ -2219,7 +2551,7 @@ server &lt;- function(input, output, session) {
       )
 
     if (nrow(dup) &gt; 0) {
-      rv$form_error_text &lt;- "A post with the same name already exists in this center. Please rename it or edit the existing post."
+      rv$form_error_text &lt;- "A post with the same name already exists in this site. Please rename it or edit the existing post."
       return()
     }
 
@@ -2228,6 +2560,14 @@ server &lt;- function(input, output, session) {
       slice(1)
     if (nrow(category_row) != 1) {
       rv$form_error_text &lt;- "Selected category is unavailable. Please choose another category."
+      return()
+    }
+
+    site_row &lt;- rv$site_registry %&gt;%
+      filter(!is_deleted, name == input$center) %&gt;%
+      slice(1)
+    if (nrow(site_row) != 1) {
+      rv$form_error_text &lt;- "Selected site is unavailable. Please choose another site."
       return()
     }
 
@@ -2367,7 +2707,7 @@ server &lt;- function(input, output, session) {
       return(tibble(
         Period = character(),
         `Post name` = character(),
-        Center = character(),
+        Site = character(),
         Category = character(),
         Note = character(),
         `Start Date` = character(),
@@ -2389,7 +2729,7 @@ server &lt;- function(input, output, session) {
       return(tibble(
         Period = character(),
         `Post name` = character(),
-        Center = character(),
+        Site = character(),
         Category = character(),
         Note = character(),
         `Start Date` = character(),
@@ -2411,7 +2751,7 @@ server &lt;- function(input, output, session) {
           TRUE ~ paste0("Project year ", project_year)
         ),
         `Post name` = post_name,
-        Center = center,
+        Site = center,
         Category = category,
         Note = note,
         `Start Date` = start_date,
@@ -2419,21 +2759,21 @@ server &lt;- function(input, output, session) {
         FTE = fte,
         Amount = value
       ) %&gt;%
-      select(Period, `Post name`, Center, Category, Note, `Start Date`, `End date`, FTE, Amount)
+      select(Period, `Post name`, Site, Category, Note, `Start Date`, `End date`, FTE, Amount)
 
     squash &lt;- input$squash_dims
     if (is.null(squash)) squash &lt;- character(0)
 
     if ("Period" %in% squash) out$Period &lt;- "All periods"
     if ("Post name" %in% squash) out$`Post name` &lt;- "All posts"
-    if ("Center" %in% squash) out$Center &lt;- "All centers"
+    if ("Site" %in% squash) out$Site &lt;- "All sites"
     if ("Category" %in% squash) out$Category &lt;- "All categories"
     if ("Post name" %in% squash) out$Note &lt;- "Mixed notes"
 
     group_cols &lt;- c()
     if (!("Period" %in% squash)) group_cols &lt;- c(group_cols, "Period")
     if (!("Post name" %in% squash)) group_cols &lt;- c(group_cols, "Post name")
-    if (!("Center" %in% squash)) group_cols &lt;- c(group_cols, "Center")
+    if (!("Site" %in% squash)) group_cols &lt;- c(group_cols, "Site")
     if (!("Category" %in% squash)) group_cols &lt;- c(group_cols, "Category")
     if (length(group_cols) == 0) group_cols &lt;- "Period"
 
@@ -2442,7 +2782,7 @@ server &lt;- function(input, output, session) {
       summarise(
         Period = if ("Period" %in% group_cols) first(Period) else "All periods",
         `Post name` = if ("Post name" %in% group_cols) first(`Post name`) else "All posts",
-        Center = if ("Center" %in% group_cols) first(Center) else "All centers",
+        Site = if ("Site" %in% group_cols) first(Site) else "All sites",
         Category = if ("Category" %in% group_cols) first(Category) else "All categories",
         Note = if (n_distinct(Note) == 1) first(Note) else "Mixed notes",
         `Start Date` = if (n_distinct(`Start Date`) == 1) first(`Start Date`) else as.Date(NA),
@@ -2455,7 +2795,7 @@ server &lt;- function(input, output, session) {
         `Start Date` = as.character(`Start Date`),
         `End date` = as.character(`End date`)
       ) %&gt;%
-      arrange(Center, `Post name`, Period)
+      arrange(Site, `Post name`, Period)
   }
 
   to_js_rows &lt;- function(df) {
@@ -2504,6 +2844,7 @@ server &lt;- function(input, output, session) {
       by_project_year = to_js_rows(build_export_sheet("project_year")),
       posts = to_js_rows(serialize_posts(rv$posts)),
       salaries = to_js_rows(serialize_salaries(rv$salaries)),
+      sites = to_js_rows(serialize_sites(rv$site_registry)),
       categories = to_js_rows(serialize_categories(rv$category_registry)),
       templates = to_js_rows(serialize_templates(rv$template_registry)),
       meta = to_js_rows(tibble(
@@ -2569,6 +2910,12 @@ server &lt;- function(input, output, session) {
       }
 
       # Issue #2: Restore categories and templates
+      site_registry_restored &lt;- make_default_sites()
+      if ("sites" %in% sheets) {
+        imported_sites &lt;- readxl::read_excel(path, sheet = "sites", col_types = "text")
+        site_registry_restored &lt;- parse_sites(as_tibble(imported_sites))
+      }
+
       category_registry_restored &lt;- make_default_categories()
       if ("categories" %in% sheets) {
         imported_categories &lt;- readxl::read_excel(path, sheet = "categories", col_types = "text")
@@ -2596,6 +2943,11 @@ server &lt;- function(input, output, session) {
       rv$next_salary_id &lt;- ifelse(nrow(salaries_parsed), max(salaries_parsed$id, na.rm = TRUE) + 1L, 1L)
       
       # Issue #2, #4: Restore settings
+      rv$site_registry &lt;- site_registry_restored
+      max_site_id &lt;- suppressWarnings(max(as.integer(site_registry_restored$id), na.rm = TRUE))
+      if (!is.finite(max_site_id)) max_site_id &lt;- 1L
+      rv$next_site_id &lt;- as.integer(max_site_id) + 1L
+
       rv$category_registry &lt;- category_registry_restored
       max_cat_id &lt;- suppressWarnings(max(as.integer(category_registry_restored$id), na.rm = TRUE))
       if (!is.finite(max_cat_id)) max_cat_id &lt;- 18L
