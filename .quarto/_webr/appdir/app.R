@@ -1106,7 +1106,7 @@ ui <- fluidPage(
       uiOutput("budget_period_error")
     ),
     column(6, style = "padding: 0 15px;",
-      numericInput("inflation_pct", "Yearly salary inflation (%)", value = 0, min = 0, step = 0.1, width = "100%")
+      numericInput("inflation_pct", "Yearly inflation (%)", value = 0, min = 0, step = 0.1, width = "100%")
     )
   ),
   sidebarLayout(
@@ -1164,7 +1164,7 @@ ui <- fluidPage(
                 "display_form",
                 "Display form:",
                 choices = c("Long (rows)" = "long", "Wide (columns)" = "wide"),
-                selected = "long",
+                selected = "wide",
                 inline = TRUE
               )
             )
@@ -2280,8 +2280,8 @@ server <- function(input, output, session) {
         mutate(
           Period = case_when(
             period_choice == "month" ~ period_month,
-            period_choice == "calendar_year" ~ paste0("Calendar year ", calendar_year),
-            TRUE ~ paste0("Project year ", project_year)
+            period_choice == "calendar_year" ~ as.character(calendar_year),
+            TRUE ~ paste0("Year ", project_year)
           ),
           `Post name` = post_name,
           Site = center,
@@ -2404,10 +2404,86 @@ server <- function(input, output, session) {
     }
   })
 
+  build_wide_from_long <- function(long_df) {
+    if (!nrow(long_df)) {
+      return(list(
+        data = tibble(Period = character()),
+        sites = character(),
+        posts_by_site = list(),
+        spacer_cols = character(),
+        numeric_cols = character()
+      ))
+    }
+
+    amount_col <- if ("Amount" %in% names(long_df)) "Amount" else if ("Value" %in% names(long_df)) "Value" else NULL
+    if (is.null(amount_col)) stop("No amount column found in table data.")
+
+    periods_vec <- unique(long_df$Period)
+    sites_vec <- unique(long_df$Site)
+    posts_by_site <- lapply(sites_vec, function(site) {
+      unique(long_df$`Post name`[long_df$Site == site])
+    })
+    names(posts_by_site) <- sites_vec
+
+    wide_df <- tibble(Period = periods_vec)
+    spacer_cols <- character(0)
+    numeric_cols <- character(0)
+
+    for (s_idx in seq_along(sites_vec)) {
+      site <- sites_vec[s_idx]
+      post_cols <- character(0)
+
+      for (post in posts_by_site[[site]]) {
+        col_name <- paste(site, post, sep = " > ")
+        wide_df[[col_name]] <- vapply(periods_vec, function(p) {
+          vals <- long_df %>%
+            filter(Period == p, Site == site, `Post name` == post) %>%
+            pull(all_of(amount_col))
+          if (!length(vals)) return(NA_real_)
+          sum(as.numeric(vals), na.rm = TRUE)
+        }, numeric(1))
+        post_cols <- c(post_cols, col_name)
+      }
+
+      total_col <- paste(site, "Site total", sep = " > ")
+      post_mat <- as.matrix(wide_df[, post_cols, drop = FALSE])
+      post_counts <- rowSums(!is.na(post_mat))
+      post_sums <- rowSums(post_mat, na.rm = TRUE)
+      wide_df[[total_col]] <- ifelse(post_counts == 0, NA_real_, post_sums)
+
+      numeric_cols <- c(numeric_cols, post_cols, total_col)
+
+      if (s_idx < length(sites_vec)) {
+        spacer_col <- strrep(" ", s_idx)
+        wide_df[[spacer_col]] <- ""
+        spacer_cols <- c(spacer_cols, spacer_col)
+      }
+    }
+
+    total_row <- as.list(rep(NA, ncol(wide_df)))
+    names(total_row) <- names(wide_df)
+    total_row$Period <- "TOTAL"
+    for (nm in numeric_cols) {
+      total_row[[nm]] <- sum(as.numeric(wide_df[[nm]]), na.rm = TRUE)
+    }
+    for (nm in spacer_cols) {
+      total_row[[nm]] <- ""
+    }
+
+    wide_df <- bind_rows(wide_df, as_tibble(total_row))
+
+    list(
+      data = wide_df,
+      sites = sites_vec,
+      posts_by_site = posts_by_site,
+      spacer_cols = spacer_cols,
+      numeric_cols = numeric_cols
+    )
+  }
+
   output$wide_form_table <- renderDT({
     req(input$display_form == "wide")
     long_data <- filtered_posts()
-    amount_col <- if ("Amount" %in% names(long_data)) "Amount" else if ("Value" %in% names(long_data)) "Value" else NULL
 
     if (!nrow(long_data)) {
       return(
@@ -2419,48 +2495,33 @@ server <- function(input, output, session) {
       )
     }
 
-    validate(need(!is.null(amount_col), "No amount column found in table data."))
+    wide_obj <- build_wide_from_long(long_data)
+    wide_df <- wide_obj$data
+    numeric_cols <- wide_obj$numeric_cols
 
-    periods_vec <- sort(unique(long_data$Period))
-    posts_by_site <- long_data %>%
-      select(Site, `Post name`) %>%
-      distinct() %>%
-      arrange(Site, `Post name`)
-
-    wide_df <- tibble(Period = periods_vec)
-
-    for (i in seq_len(nrow(posts_by_site))) {
-      site <- posts_by_site$Site[i]
-      post <- posts_by_site$`Post name`[i]
-      col_name <- paste(site, post, sep = " > ")
-
-      wide_df[[col_name]] <- vapply(periods_vec, function(p) {
-        vals <- long_data %>%
-          filter(Period == p, Site == site, `Post name` == post) %>%
-          pull(all_of(amount_col))
-        if (!length(vals)) return(NA_real_)
-        sum(as.numeric(vals), na.rm = TRUE)
-      }, numeric(1))
-    }
-
-    numeric_cols <- setdiff(names(wide_df), "Period")
-    total_row <- tibble(Period = "TOTAL")
-    for (nm in numeric_cols) {
-      total_row[[nm]] <- sum(wide_df[[nm]], na.rm = TRUE)
-    }
-    wide_df <- bind_rows(wide_df, total_row)
-
-    site_counts <- posts_by_site %>% count(Site, name = "n_posts")
+    site_counts <- tibble(
+      Site = wide_obj$sites,
+      n_posts = map_int(wide_obj$posts_by_site, length)
+    )
     header_top <- tags$tr(
       tags$th(rowspan = 2, "Period"),
       lapply(seq_len(nrow(site_counts)), function(i) {
-        tags$th(colspan = site_counts$n_posts[i], site_counts$Site[i], style = "text-align:center;")
+        tagList(
+          tags$th(colspan = site_counts$n_posts[i] + 1, site_counts$Site[i], style = "text-align:center;border-right:2px solid #777;"),
+          if (i < nrow(site_counts)) tags$th(rowspan = 2, "", style = "min-width:16px;width:16px;border:none;background:#fff;")
+        )
       })
     )
     header_bottom <- tags$tr(
-      lapply(seq_len(nrow(posts_by_site)), function(i) {
-        tags$th(posts_by_site$`Post name`[i])
+      unlist(lapply(seq_len(nrow(site_counts)), function(i) {
+        site <- site_counts$Site[i]
+        posts <- wide_obj$posts_by_site[[site]]
+        c(
+          lapply(posts, function(p) tags$th(p)),
+          list(tags$th("Site total", style = "font-weight:700;"))
+        )
       })
+      , recursive = FALSE)
     )
     table_header <- withTags(table(class = "display", thead(header_top, header_bottom)))
 
@@ -2803,8 +2864,8 @@ server <- function(input, output, session) {
       mutate(
         Period = case_when(
           period_choice == "month" ~ period_month,
-          period_choice == "calendar_year" ~ paste0("Calendar year ", calendar_year),
-          TRUE ~ paste0("Project year ", project_year)
+          period_choice == "calendar_year" ~ as.character(calendar_year),
+          TRUE ~ paste0("Year ", project_year)
         ),
         `Post name` = post_name,
         Site = center,
@@ -2854,6 +2915,15 @@ server <- function(input, output, session) {
       arrange(Site, `Post name`, Period)
   }
 
+  build_export_wide_sheet <- function(period_choice) {
+    long_df <- build_export_sheet(period_choice)
+    if (!nrow(long_df)) {
+      return(tibble(Period = character()))
+    }
+    wide_obj <- build_wide_from_long(long_df)
+    wide_obj$data
+  }
+
   to_js_rows <- function(df) {
     if (!nrow(df)) return(list())
     lapply(seq_len(nrow(df)), function(i) as.list(df[i, , drop = FALSE]))
@@ -2895,9 +2965,12 @@ server <- function(input, output, session) {
     }
 
     sheets <- list(
-      by_month = to_js_rows(build_export_sheet("month")),
-      by_calendar_year = to_js_rows(build_export_sheet("calendar_year")),
-      by_project_year = to_js_rows(build_export_sheet("project_year")),
+      by_project_year_wide = to_js_rows(build_export_wide_sheet("project_year")),
+      by_project_year_long = to_js_rows(build_export_sheet("project_year")),
+      by_calendar_year_wide = to_js_rows(build_export_wide_sheet("calendar_year")),
+      by_calendar_year_long = to_js_rows(build_export_sheet("calendar_year")),
+      by_month_wide = to_js_rows(build_export_wide_sheet("month")),
+      by_month_long = to_js_rows(build_export_sheet("month")),
       posts = to_js_rows(serialize_posts(rv$posts)),
       salaries = to_js_rows(serialize_salaries(rv$salaries)),
       sites = to_js_rows(serialize_sites(rv$site_registry)),
