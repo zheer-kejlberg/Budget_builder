@@ -1064,6 +1064,71 @@ ui &lt;- fluidPage(
       font-weight: 700;
       margin: 6px 0;
     }
+    .flash-msg {
+      overflow: hidden;
+      border-radius: 6px;
+      padding: 10px;
+      margin: 8px 0;
+      font-weight: 600;
+      opacity: 0;
+      max-height: 0;
+      transform: translateY(-4px);
+      animation: msgEnter 0.22s ease-out forwards, msgExit 0.35s ease-in 3.65s forwards;
+    }
+    .flash-msg.flash-error {
+      background: #fdecea;
+      border: 1px solid #f5c2c7;
+      color: #842029;
+    }
+    .flash-msg.flash-success {
+      background: #e7f8ec;
+      border: 1px solid #95d5a6;
+      color: #1d6f33;
+    }
+    #form_error:empty,
+    #success_feedback:empty,
+    #export_error:empty {
+      height: 0 !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      min-height: 0 !important;
+      line-height: 0 !important;
+      font-size: 0 !important;
+      border: 0 !important;
+      overflow: hidden !important;
+    }
+    @keyframes msgEnter {
+      from {
+        opacity: 0;
+        max-height: 0;
+        transform: translateY(-4px);
+        margin-top: 0;
+        margin-bottom: 0;
+      }
+      to {
+        opacity: 1;
+        max-height: 140px;
+        transform: translateY(0);
+        margin-top: 8px;
+        margin-bottom: 8px;
+      }
+    }
+    @keyframes msgExit {
+      from {
+        opacity: 1;
+        max-height: 140px;
+        transform: translateY(0);
+        margin-top: 8px;
+        margin-bottom: 8px;
+      }
+      to {
+        opacity: 0;
+        max-height: 0;
+        transform: translateY(-4px);
+        margin-top: 0;
+        margin-bottom: 0;
+      }
+    }
     .dataTables_wrapper .dataTables_filter {
       display: none;
     }
@@ -1341,11 +1406,10 @@ ui &lt;- fluidPage(
       textAreaInput("note", "Note", value = "", rows = 2),
       tags$div(style = "font-size:0.8em;color:#b00020;margin-top:-4px;", "* = required"),
       fluidRow(
-        column(12, actionButton("add_or_update", "Save budget post", class = "btn-primary", style = "width: 100%;"))
+        column(12, actionButton("add_or_update", "Add budget post", class = "btn-primary", style = "width: 100%;"))
       ),
       uiOutput("form_error"),
       uiOutput("success_feedback"),
-      br(),
       tags$div(
         class = "row sidebar-split-row",
         tags$div(class = "col-sm-6 sidebar-split-left", actionButton("edit_selected", "Edit post", style = "width: 100%;")),
@@ -1534,9 +1598,11 @@ server &lt;- function(input, output, session) {
     function_expr_draft = "rep((510000*FTE)/12, n)",
     value_inputs_refresh = 0L,
     form_error_text = NULL,
+    form_error_at = NULL,
     salary_error_text = NULL,
     budget_error_text = NULL,
     export_error_text = NULL,
+    export_error_at = NULL,
     sites_error_text = NULL,
     categories_error_text = NULL,
     templates_error_text = NULL,
@@ -1606,13 +1672,39 @@ server &lt;- function(input, output, session) {
 
   output$form_error &lt;- renderUI({
     if (is.null(rv$form_error_text)) return(NULL)
-    tags$div(class = "inline-error", rv$form_error_text)
+    tags$div(class = "flash-msg flash-error", rv$form_error_text)
   })
+
+  observeEvent(rv$form_error_text, {
+    if (!is.null(rv$form_error_text)) {
+      rv$form_error_at &lt;- Sys.time()
+      stamp &lt;- rv$form_error_at
+      later::later(function() {
+        if (!is.null(rv$form_error_at) &amp;&amp; identical(rv$form_error_at, stamp)) {
+          rv$form_error_text &lt;- NULL
+          rv$form_error_at &lt;- NULL
+        }
+      }, delay = 4)
+    }
+  }, ignoreInit = TRUE)
 
   output$export_error &lt;- renderUI({
     if (is.null(rv$export_error_text)) return(NULL)
-    tags$div(class = "inline-error", rv$export_error_text)
+    tags$div(class = "flash-msg flash-error", rv$export_error_text)
   })
+
+  observeEvent(rv$export_error_text, {
+    if (!is.null(rv$export_error_text)) {
+      rv$export_error_at &lt;- Sys.time()
+      stamp &lt;- rv$export_error_at
+      later::later(function() {
+        if (!is.null(rv$export_error_at) &amp;&amp; identical(rv$export_error_at, stamp)) {
+          rv$export_error_text &lt;- NULL
+          rv$export_error_at &lt;- NULL
+        }
+      }, delay = 4)
+    }
+  }, ignoreInit = TRUE)
 
   output$salary_error &lt;- renderUI({
     if (is.null(rv$salary_error_text)) return(NULL)
@@ -1926,18 +2018,21 @@ server &lt;- function(input, output, session) {
   })
 
   output$success_feedback &lt;- renderUI({
-    if (is.null(rv$success_text) || is.null(rv$success_at)) return(NULL)
-    invalidateLater(250, session)
-    if (as.numeric(difftime(Sys.time(), rv$success_at, units = "secs")) &gt; 4) {
-      rv$success_text &lt;- NULL
-      rv$success_at &lt;- NULL
-      return(NULL)
-    }
-    tags$div(
-      style = "background:#e7f8ec;border:1px solid #95d5a6;color:#1d6f33;padding:10px;border-radius:6px;margin:8px 0;font-weight:600;",
-      rv$success_text
-    )
+    if (is.null(rv$success_text)) return(NULL)
+    tags$div(class = "flash-msg flash-success", rv$success_text)
   })
+
+  observeEvent(rv$success_at, {
+    if (!is.null(rv$success_at)) {
+      stamp &lt;- rv$success_at
+      later::later(function() {
+        if (!is.null(rv$success_at) &amp;&amp; identical(rv$success_at, stamp)) {
+          rv$success_text &lt;- NULL
+          rv$success_at &lt;- NULL
+        }
+      }, delay = 4)
+    }
+  }, ignoreInit = TRUE)
 
   observeEvent(TRUE, {
     updateDateInput(session, "post_start", value = input$budget_start)
@@ -2709,7 +2804,8 @@ server &lt;- function(input, output, session) {
         sites = character(),
         posts_by_site = list(),
         spacer_cols = character(),
-        numeric_cols = character()
+        numeric_cols = character(),
+        flagged_post_cols = character()
       ))
     }
 
@@ -2721,7 +2817,8 @@ server &lt;- function(input, output, session) {
         sites = character(),
         posts_by_site = list(),
         spacer_cols = character(),
-        numeric_cols = character()
+        numeric_cols = character(),
+        flagged_post_cols = character()
       ))
     }
 
@@ -2738,6 +2835,7 @@ server &lt;- function(input, output, session) {
     wide_df &lt;- tibble(Period = periods_vec)
     spacer_cols &lt;- character(0)
     numeric_cols &lt;- character(0)
+    flagged_post_cols &lt;- character(0)
 
     for (s_idx in seq_along(sites_vec)) {
       site &lt;- sites_vec[s_idx]
@@ -2753,6 +2851,11 @@ server &lt;- function(input, output, session) {
           sum(as.numeric(vals), na.rm = TRUE)
         }, numeric(1))
         post_cols &lt;- c(post_cols, col_name)
+
+        # Mark post columns that contain at least one amendment-required post.
+        if (any(data_rows$Site == site &amp; data_rows$`Post name` == post &amp; data_rows$needs_amendment, na.rm = TRUE)) {
+          flagged_post_cols &lt;- c(flagged_post_cols, col_name)
+        }
       }
 
       total_col &lt;- paste(site, "Site total", sep = " &gt; ")
@@ -2803,7 +2906,8 @@ server &lt;- function(input, output, session) {
       sites = sites_vec,
       posts_by_site = posts_by_site,
       spacer_cols = spacer_cols,
-      numeric_cols = numeric_cols
+      numeric_cols = numeric_cols,
+      flagged_post_cols = unique(flagged_post_cols)
     )
   }
 
@@ -2824,6 +2928,7 @@ server &lt;- function(input, output, session) {
     wide_obj &lt;- build_wide_from_long(long_data)
     wide_df &lt;- wide_obj$data
     numeric_cols &lt;- wide_obj$numeric_cols
+    flagged_post_cols &lt;- wide_obj$flagged_post_cols
 
     site_counts &lt;- tibble(
       Site = wide_obj$sites,
@@ -2878,6 +2983,13 @@ server &lt;- function(input, output, session) {
 
     if (length(numeric_cols) &gt; 0) {
       dt &lt;- dt %&gt;% formatRound(columns = numeric_cols, digits = 2, interval = 3, mark = ",")
+    }
+
+    if (length(flagged_post_cols) &gt; 0) {
+      dt &lt;- dt %&gt;% formatStyle(
+        columns = flagged_post_cols,
+        backgroundColor = "rgba(255, 0, 0, 0.2)"
+      )
     }
 
     dt
