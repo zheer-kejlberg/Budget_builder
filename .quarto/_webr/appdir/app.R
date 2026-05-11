@@ -1092,6 +1092,13 @@ ui <- fluidPage(
       .sidebar-split-right {
         padding: 0 15px 0 5px;
       }
+      .import-side-border {
+        border-left: 1px solid #ddd;
+        border-right: 1px solid #ddd;
+      }
+      .period-side-border {
+        border-right: 1px solid #ddd;
+      }
     }
     "
   ))),
@@ -1254,20 +1261,20 @@ ui <- fluidPage(
   # Row 1: Workbook name | Import | Export
   fluidRow(
     style = "margin: 15px 0; padding: 15px 0; width: 100%;",
-    column(4, style = "padding: 0 15px;",
+    column(4,
       tags$label(strong("Workbook name")),
       textInput("workbook_name", NULL, value = "Budget", width = "100%"),
       uiOutput("workbook_name_error")
     ),
-    column(4, style = "border-left: 1px solid #ddd; border-right: 1px solid #ddd; padding: 0 15px;",
+    column(4, class = "import-side-border",
       tags$label(strong("Import workbook")),
+      tags$p(" ...to continue where you left off", style = "font-size: 0.85em; color: #666; margin: 4px 0; text-align: left;display: inline;"),
       tags$div(
         class = "import-file-wrap",
         fileInput("import_file", NULL, accept = ".xlsx", width = "100%")
-      ),
-      tags$p("...to continue where you left off", style = "font-size: 0.85em; color: #666; margin: 4px 0; text-align: left;")
+      )
     ),
-    column(4, style = "padding: 0 15px;",
+    column(4,
       tags$label(strong("Export workbook")),
       tags$div(style = "width: 100%;",
         uiOutput("export_control")
@@ -1278,7 +1285,7 @@ ui <- fluidPage(
   # Row 2: Global values (dates + inflation)
   fluidRow(
     style = "margin: 15px 0; padding: 15px 0; width: 100%; background-color: #f8f9fa;",
-    column(6, style = "border-right: 1px solid #ddd; padding: 0 15px;",
+    column(6, class = "period-side-border",
       dateRangeInput("budget_range", "Project period", start = start_default, end = end_default, width = "100%"),
       tags$div(
         style = "display:none;",
@@ -1287,7 +1294,7 @@ ui <- fluidPage(
       ),
       uiOutput("budget_period_error")
     ),
-    column(6, style = "padding: 0 15px;",
+    column(6,
       numericInput("inflation_pct", "Yearly inflation (%)", value = 0, min = 0, step = 0.1, width = "100%")
     )
   ),
