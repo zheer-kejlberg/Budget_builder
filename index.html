@@ -559,8 +559,7 @@ find_posts_with_deleted_site &lt;- function(posts_tbl, site_registry) {
 get_post_amendment_fields &lt;- function(post_row, budget_start, budget_end, category_registry, site_registry) {
   fields &lt;- character(0)
 
-  if (post_row$start_date &lt; budget_start) fields &lt;- c(fields, "post_start")
-  if (post_row$end_date &gt; budget_end) fields &lt;- c(fields, "post_end")
+  if (post_row$start_date &lt; budget_start || post_row$end_date &gt; budget_end) fields &lt;- c(fields, "post_date_range")
 
   bad_category &lt;- category_registry %&gt;%
     filter(name == post_row$category, is_deleted) %&gt;%
@@ -1052,12 +1051,20 @@ required_label &lt;- function(text) {
 ui &lt;- fluidPage(
   tags$head(tags$style(HTML(
     "
-    .container-fluid, .form-control, .btn, .control-label, .selectize-input, .shiny-input-container {
-      font-size: 15px !important;
+    #header-row input, #header-row .btn {
+      height:38px;
+      margin:0;
+    },
+    input.form-control, div.selectize-input, container-fluid {
+      font-size: 12px !important;
+    }
+    label.control-label {
+      font-size: 13px !important;
     }
     .btn {
       padding: 0.8rem 1.2rem !important;
       margin: 0 0 10px 0;
+      font-size: 13px !important;
     }
     .inline-error {
       color: #b00020;
@@ -1104,6 +1111,7 @@ ui &lt;- fluidPage(
         transform: translateY(-4px);
         margin-top: 0;
         margin-bottom: 0;
+        padding: 0 10px;
       }
       to {
         opacity: 1;
@@ -1111,6 +1119,7 @@ ui &lt;- fluidPage(
         transform: translateY(0);
         margin-top: 8px;
         margin-bottom: 8px;
+        padding: 10px;
       }
     }
     @keyframes msgExit {
@@ -1120,6 +1129,7 @@ ui &lt;- fluidPage(
         transform: translateY(0);
         margin-top: 8px;
         margin-bottom: 8px;
+        padding: 10px;
       }
       to {
         opacity: 0;
@@ -1127,6 +1137,7 @@ ui &lt;- fluidPage(
         transform: translateY(-4px);
         margin-top: 0;
         margin-bottom: 0;
+        padding: 0 10px;
       }
     }
     .dataTables_wrapper .dataTables_filter {
@@ -1139,9 +1150,8 @@ ui &lt;- fluidPage(
     h4 {
       font-size: 20px;
       text-align: center;
-      padding: 10px 0 10px;
+      padding: 15px 0 10px;
       font-weight: 500;
-      text-decoration-line: underline;
     }
     .settings-tab .btn {
       width: 100% !important;
@@ -1352,7 +1362,7 @@ ui &lt;- fluidPage(
   # Issue #5: Restructured header layout
   # Row 1: Workbook name | Import | Export
   fluidRow(
-    style = "margin: 15px 0; padding: 15px 0; width: 100%;",
+    style = "margin: 0; padding: 15px 0; width: 100%;", id = "header-row",
     column(4,
       tags$label(strong("Workbook name")),
       textInput("workbook_name", NULL, value = "Budget", width = "100%"),
@@ -1376,7 +1386,7 @@ ui &lt;- fluidPage(
   ),
   # Row 2: Global values (dates + inflation)
   fluidRow(
-    style = "margin: 15px 0; padding: 15px 0; width: 100%; background-color: #f8f9fa;",
+    style = "margin: 0 0 30px 0; padding: 15px 0; width: 100%; background-color: #f8f9fa;",
     column(6, class = "period-side-border",
       dateRangeInput("budget_range", "Project period", start = start_default, end = end_default, width = "100%"),
       tags$div(
@@ -1394,7 +1404,7 @@ ui &lt;- fluidPage(
     sidebarPanel(
       h4("Add or edit post"),
       selectInput("template_name", "Template", choices = make_default_templates()$name, selected = "Custom"),
-      actionButton("apply_template", "Apply template", style = "width: 100%; margin-bottom: 4px;"),
+      actionButton("apply_template", "Apply template", style = "width: 100%; margin-bottom: 5px;"),
       tags$div(
         class = "row sidebar-split-row",
         tags$div(class = "col-sm-6 sidebar-split-left", actionButton("edit_template_btn", "Edit template", style = "width: 100%;")),
@@ -1404,8 +1414,7 @@ ui &lt;- fluidPage(
       textInput("post_name", required_label("Post name")),
       selectInput("center", required_label("Site"), choices = make_default_sites()$name, selected = "Main"),
       selectInput("category", required_label("Category"), choices = c("", make_default_categories()$name), selected = ""),
-      dateInput("post_start", required_label("Post start")),
-      dateInput("post_end", required_label("Post end")),
+      dateRangeInput("post_date_range", required_label("Date range"), start = start_default, end = end_default, width = "100%"),
       numericInput("fte", "FTE", value = NA_real_, min = 0, step = 0.1),
       selectInput("value_mode", "How should amount be defined?", choices = c("constant", "function", "variable"), selected = "constant"),
       selectInput("value_unit", "Amount frequency", choices = c("month", "year"), selected = "month"),
@@ -1642,8 +1651,7 @@ server &lt;- function(input, output, session) {
     updateTextInput(session, "post_name", label = amend_label("Post name", show_amend = is_amended_field("post_name"), required = TRUE))
     updateSelectInput(session, "center", label = amend_label("Site", show_amend = is_amended_field("center"), required = TRUE))
     updateSelectInput(session, "category", label = amend_label("Category", show_amend = is_amended_field("category"), required = TRUE))
-    updateDateInput(session, "post_start", label = amend_label("Post start", show_amend = is_amended_field("post_start"), required = TRUE))
-    updateDateInput(session, "post_end", label = amend_label("Post end", show_amend = is_amended_field("post_end"), required = TRUE))
+    updateDateRangeInput(session, "post_date_range", label = amend_label("Date range", show_amend = is_amended_field("post_date_range"), required = TRUE))
   }
 
   reset_form &lt;- function() {
@@ -1655,8 +1663,7 @@ server &lt;- function(input, output, session) {
     updateTextInput(session, "post_name", value = "")
     updateSelectInput(session, "center", selected = "Main")
     updateSelectInput(session, "category", selected = "")
-    updateDateInput(session, "post_start", value = input$budget_start)
-    updateDateInput(session, "post_end", value = input$budget_end)
+    updateDateRangeInput(session, "post_date_range", start = input$budget_start, end = input$budget_end)
     updateNumericInput(session, "fte", value = NA_real_)
     updateSelectInput(session, "value_mode", selected = "constant")
     updateSelectInput(session, "value_unit", selected = "month")
@@ -2042,8 +2049,7 @@ server &lt;- function(input, output, session) {
   }, ignoreInit = TRUE)
 
   observeEvent(TRUE, {
-    updateDateInput(session, "post_start", value = input$budget_start)
-    updateDateInput(session, "post_end", value = input$budget_end)
+    updateDateRangeInput(session, "post_date_range", start = input$budget_start, end = input$budget_end)
   }, once = TRUE)
 
   observeEvent(input$budget_range, {
@@ -2459,11 +2465,9 @@ server &lt;- function(input, output, session) {
     updateTextAreaInput(session, "note", value = tpl$note)
 
     if (!is.na(tpl$duration_years)) {
-      updateDateInput(session, "post_start", value = input$budget_start)
-      updateDateInput(session, "post_end", value = input$budget_start %m+% years(as.integer(tpl$duration_years)) - days(1))
+      updateDateRangeInput(session, "post_date_range", start = input$budget_start, end = input$budget_start %m+% years(as.integer(tpl$duration_years)) - days(1))
     } else {
-      updateDateInput(session, "post_start", value = input$budget_start)
-      updateDateInput(session, "post_end", value = input$budget_end)
+      updateDateRangeInput(session, "post_date_range", start = input$budget_start, end = input$budget_end)
     }
 
     vals &lt;- tpl$values[[1]]
@@ -2489,8 +2493,9 @@ server &lt;- function(input, output, session) {
     updateNumericInput(session, "fte", value = tpl$fte)
     updateTextAreaInput(session, "note", value = tpl$note)
     if (!is.na(tpl$duration_years)) {
-      updateDateInput(session, "post_start", value = input$budget_start)
-      updateDateInput(session, "post_end", value = input$budget_start %m+% years(as.integer(tpl$duration_years)) - days(1))
+      updateDateRangeInput(session, "post_date_range", start = input$budget_start, end = input$budget_start %m+% years(as.integer(tpl$duration_years)) - days(1))
+    } else {
+      updateDateRangeInput(session, "post_date_range", start = input$budget_start, end = input$budget_end)
     }
     rv$amend_fields &lt;- character(0)
     rv$value_inputs_refresh &lt;- rv$value_inputs_refresh + 1L
@@ -2518,8 +2523,8 @@ server &lt;- function(input, output, session) {
     }
 
     dur_years &lt;- tryCatch({
-      if (!is.null(input$post_start) &amp;&amp; !is.null(input$post_end) &amp;&amp; !is.na(input$post_start) &amp;&amp; !is.na(input$post_end)) {
-        as.numeric(difftime(as.Date(input$post_end), as.Date(input$post_start), units = "days")) / 365.25
+      if (!is.null(input$post_date_range) &amp;&amp; length(input$post_date_range) == 2 &amp;&amp; all(!is.na(input$post_date_range))) {
+        as.numeric(difftime(as.Date(input$post_date_range[2]), as.Date(input$post_date_range[1]), units = "days")) / 365.25
       } else {
         NA_real_
       }
@@ -2555,12 +2560,16 @@ server &lt;- function(input, output, session) {
   })
 
   required_value_count &lt;- reactive({
-    req(input$post_start, input$post_end)
-    if (input$post_end &lt; input$post_start) return(0L)
+    req(input$post_date_range)
+    req(length(input$post_date_range) == 2)
+    req(all(!is.na(input$post_date_range)))
+    range_start &lt;- as.Date(input$post_date_range[1])
+    range_end &lt;- as.Date(input$post_date_range[2])
+    if (range_end &lt; range_start) return(0L)
     if (input$value_unit == "year") {
-      n_years_between(input$post_start, input$post_end)
+      n_years_between(range_start, range_end)
     } else {
-      n_months_between(input$post_start, input$post_end)
+      n_months_between(range_start, range_end)
     }
   })
 
@@ -3078,8 +3087,7 @@ server &lt;- function(input, output, session) {
     updateTextInput(session, "post_name", value = row$post_name)
     updateSelectInput(session, "center", selected = row$center)
     updateSelectInput(session, "category", selected = row$category)
-    updateDateInput(session, "post_start", value = row$start_date)
-    updateDateInput(session, "post_end", value = row$end_date)
+    updateDateRangeInput(session, "post_date_range", start = row$start_date, end = row$end_date)
     updateNumericInput(session, "fte", value = row$fte)
     updateSelectInput(session, "value_mode", selected = row$value_mode)
     updateSelectInput(session, "value_unit", selected = row$value_unit)
@@ -3118,20 +3126,22 @@ server &lt;- function(input, output, session) {
     rv$export_error_text &lt;- NULL
     rv$pending_post_row &lt;- NULL
 
+    range_start &lt;- if (!is.null(input$post_date_range) &amp;&amp; length(input$post_date_range) == 2) as.Date(input$post_date_range[1]) else as.Date(NA)
+    range_end &lt;- if (!is.null(input$post_date_range) &amp;&amp; length(input$post_date_range) == 2) as.Date(input$post_date_range[2]) else as.Date(NA)
+
     missing_fields &lt;- c()
     if (is.null(input$post_name) || !nzchar(trimws(input$post_name))) missing_fields &lt;- c(missing_fields, "Post name")
     if (is.null(input$center) || !nzchar(trimws(input$center))) missing_fields &lt;- c(missing_fields, "Site")
     if (is.null(input$category) || !nzchar(trimws(input$category))) missing_fields &lt;- c(missing_fields, "Category")
-    if (is.null(input$post_start) || is.na(input$post_start)) missing_fields &lt;- c(missing_fields, "Post start")
-    if (is.null(input$post_end) || is.na(input$post_end)) missing_fields &lt;- c(missing_fields, "Post end")
+    if (is.na(range_start) || is.na(range_end)) missing_fields &lt;- c(missing_fields, "Date range")
 
     if (length(missing_fields) &gt; 0) {
       rv$form_error_text &lt;- paste("Required fields missing:", paste(missing_fields, collapse = ", "))
       return()
     }
 
-    if (input$post_end &lt; input$post_start) {
-      rv$form_error_text &lt;- "Post end must be on or after post start."
+    if (range_end &lt; range_start) {
+      rv$form_error_text &lt;- "Date range end must be on or after start."
       return()
     }
 
@@ -3148,8 +3158,8 @@ server &lt;- function(input, output, session) {
       center = trimws(input$center),
       post_name = input$post_name,
       category = input$category,
-      start_date = as.Date(input$post_start),
-      end_date = as.Date(input$post_end),
+      start_date = range_start,
+      end_date = range_end,
       fte = suppressWarnings(as.numeric(input$fte)),
       value_mode = input$value_mode,
       value_unit = input$value_unit,
