@@ -1037,6 +1037,14 @@ ui <- fluidPage(
     .settings-tab .btn {
       width: 100% !important;
     }
+    #export_xlsx.btn {
+      width: 100% !important;
+    }
+    .import-file-wrap .form-group,
+    .import-file-wrap .input-group,
+    .import-file-wrap .progress {
+      margin-bottom: 0 !important;
+    }
     .shiny-input-container .input-group .form-control,
     .shiny-input-container .input-group .input-group-btn .btn {
       height: 38px !important;
@@ -1089,29 +1097,50 @@ ui <- fluidPage(
     
     "
   ))),
-  # Issue #3: Workbook name header
+  # Issue #5: Restructured header layout
+  # Row 1: Workbook name | Import | Export
   fluidRow(
-    column(12, style = "padding: 15px;", 
-      fluidRow(
-        column(2, tags$label(strong("Workbook name:"))),
-        column(3, textInput("workbook_name", NULL, value = "Budget")),
-        column(7, uiOutput("workbook_name_error"))
-      )
+    style = "margin: 15px 0; padding: 15px 0; width: 100%;",
+    column(4, style = "padding: 0 15px;",
+      tags$label(strong("Workbook name")),
+      textInput("workbook_name", NULL, value = "Budget", width = "100%"),
+      uiOutput("workbook_name_error")
+    ),
+    column(4, style = "border-left: 1px solid #ddd; border-right: 1px solid #ddd; padding: 0 15px;",
+      tags$label(strong("Import workbook")),
+      tags$div(
+        class = "import-file-wrap",
+        fileInput("import_file", NULL, accept = ".xlsx", width = "100%")
+      ),
+      tags$p("Continue where you left off", style = "font-size: 0.85em; color: #666; margin: 4px 0; text-align: left;")
+    ),
+    column(4, style = "padding: 0 15px;",
+      tags$label(strong("Export workbook")),
+      tags$div(style = "width: 100%;",
+        uiOutput("export_control")
+      ),
+      uiOutput("export_error")
+    )
+  ),
+  # Row 2: Global values (dates + inflation)
+  fluidRow(
+    style = "margin: 15px 0; padding: 15px 0; width: 100%; background-color: #f8f9fa;",
+    column(6, style = "border-right: 1px solid #ddd; padding: 0 15px;",
+      dateRangeInput("budget_range", "Project period", start = start_default, end = end_default, width = "100%"),
+      tags$div(
+        style = "display:none;",
+        dateInput("budget_start", NULL, value = start_default),
+        dateInput("budget_end", NULL, value = end_default)
+      ),
+      uiOutput("budget_period_error")
+    ),
+    column(6, style = "padding: 0 15px;",
+      numericInput("inflation_pct", "Yearly salary inflation (%)", value = 0, min = 0, step = 0.1, width = "100%")
     )
   ),
   sidebarLayout(
     sidebarPanel(
-      h4("Continue from existing budget (optional)"),
-      tags$p("Import a previously exported budget workbook to continue where you left off."),
-      fileInput("import_file", "Import Budget workbook (.xlsx)", accept = ".xlsx"),
-      hr(),
-      h4("1) Budget period"),
-      dateInput("budget_start", "Budget start", value = start_default),
-      dateInput("budget_end", "Budget end", value = end_default),
-      numericInput("inflation_pct", "Yearly salary inflation (%)", value = 0, min = 0, step = 0.1),
-      uiOutput("budget_period_error"),
-      hr(),
-      h4("2) Add or edit post"),
+      h4("1) Add or edit post"),
       selectInput("template_name", "Template", choices = make_default_templates()$name, selected = "Custom"),
       actionButton("apply_template", "Apply template"),
       textInput("post_name", required_label("Post name")),
@@ -1132,11 +1161,7 @@ ui <- fluidPage(
       uiOutput("success_feedback"),
       br(),
       actionButton("edit_selected", "Edit selected post"),
-      actionButton("delete_selected", "Delete selected post", class = "btn-danger"),
-      hr(),
-      br(),
-      uiOutput("export_control"),
-      uiOutput("export_error")
+      actionButton("delete_selected", "Delete selected post", class = "btn-danger")
     ),
     mainPanel(
       tabsetPanel(
@@ -1144,7 +1169,7 @@ ui <- fluidPage(
           "Post search and overview",
           fluidRow(
             column(
-              4,
+              3,
               selectInput(
                 "period_format",
                 "Display by time periods:",
@@ -1153,12 +1178,22 @@ ui <- fluidPage(
               )
             ),
             column(
-              8,
+              5,
               checkboxGroupInput(
                 "squash_dims",
                 "Collapse by:",
                 choices = c("Period", "Post name", "Site", "Category"),
                 selected = character(0),
+                inline = TRUE
+              )
+            ),
+            column(
+              4,
+              radioButtons(
+                "display_form",
+                "Display form:",
+                choices = c("Long (rows)" = "long", "Wide (columns)" = "wide"),
+                selected = "long",
                 inline = TRUE
               )
             )
@@ -1175,7 +1210,7 @@ ui <- fluidPage(
             column(3, numericInput("filter_amount_max", "Max amount", value = 10000000)),
             column(6, textInput("filter_text", "Free-text search", value = "", placeholder = "Search in period, post name, site, category"))
           ),
-          DTOutput("posts_table"),
+          uiOutput("post_table_container"),
           br(),
           htmlOutput("amendment_status")
         ),
@@ -1722,6 +1757,18 @@ server <- function(input, output, session) {
     updateDateInput(session, "post_end", value = input$budget_end)
   }, once = TRUE)
 
+  observeEvent(input$budget_range, {
+    req(!is.null(input$budget_range), length(input$budget_range) == 2)
+    range_start <- as.Date(input$budget_range[1])
+    range_end <- as.Date(input$budget_range[2])
+    if (!is.na(range_start) && !identical(as.Date(input$budget_start), range_start)) {
+      updateDateInput(session, "budget_start", value = range_start)
+    }
+    if (!is.na(range_end) && !identical(as.Date(input$budget_end), range_end)) {
+      updateDateInput(session, "budget_end", value = range_end)
+    }
+  }, ignoreInit = FALSE)
+
   observeEvent(c(input$budget_start, input$budget_end), {
     req(input$budget_start, input$budget_end)
 
@@ -1732,6 +1779,7 @@ server <- function(input, output, session) {
 
     rv$budget_error_text <- NULL
     rv$export_error_text <- NULL
+    updateDateRangeInput(session, "budget_range", start = input$budget_start, end = input$budget_end)
     updateDateRangeInput(session, "filter_month_range", start = input$budget_start, end = input$budget_end)
 
     rv$posts <- flag_posts(rv$posts, input$budget_start, input$budget_end)
@@ -2204,9 +2252,11 @@ server <- function(input, output, session) {
 
   observe({
     s <- post_summary()
+    site_choices <- sort(unique(rv$site_registry$name[!rv$site_registry$is_deleted]))
+    category_choices <- sort(unique(rv$category_registry$name[!rv$category_registry$is_deleted]))
     updateSelectizeInput(session, "filter_name", choices = sort(unique(s$post_name)), selected = character(0), server = TRUE)
-    updateSelectizeInput(session, "filter_center", choices = sort(unique(s$center)), selected = character(0), server = TRUE)
-    updateSelectizeInput(session, "filter_category", choices = sort(unique(s$category)), selected = character(0), server = TRUE)
+    updateSelectizeInput(session, "filter_center", choices = site_choices, selected = character(0), server = TRUE)
+    updateSelectizeInput(session, "filter_category", choices = category_choices, selected = character(0), server = TRUE)
   })
 
   filtered_posts <- reactive({
@@ -2348,6 +2398,7 @@ server <- function(input, output, session) {
   })
 
   output$posts_table <- renderDT({
+    req(input$display_form == "long")
     tbl <- filtered_posts()
     datatable(
       tbl,
@@ -2372,6 +2423,103 @@ server <- function(input, output, session) {
       )
     ) %>%
       formatRound("Amount", digits = 2, interval = 3, mark = ",")
+  })
+
+  output$post_table_container <- renderUI({
+    if (isTRUE(input$display_form == "wide")) {
+      DTOutput("wide_form_table")
+    } else {
+      DTOutput("posts_table")
+    }
+  })
+
+  output$wide_form_table <- renderDT({
+    req(input$display_form == "wide")
+    long_data <- filtered_posts()
+    amount_col <- if ("Amount" %in% names(long_data)) "Amount" else if ("Value" %in% names(long_data)) "Value" else NULL
+
+    if (!nrow(long_data)) {
+      return(
+        datatable(
+          tibble(Message = "No posts to display. Add posts or adjust filters."),
+          rownames = FALSE,
+          options = list(dom = "t", paging = FALSE, searching = FALSE, ordering = FALSE)
+        )
+      )
+    }
+
+    validate(need(!is.null(amount_col), "No amount column found in table data."))
+
+    periods_vec <- sort(unique(long_data$Period))
+    posts_by_site <- long_data %>%
+      select(Site, `Post name`) %>%
+      distinct() %>%
+      arrange(Site, `Post name`)
+
+    wide_df <- tibble(Period = periods_vec)
+
+    for (i in seq_len(nrow(posts_by_site))) {
+      site <- posts_by_site$Site[i]
+      post <- posts_by_site$`Post name`[i]
+      col_name <- paste(site, post, sep = " > ")
+
+      wide_df[[col_name]] <- vapply(periods_vec, function(p) {
+        vals <- long_data %>%
+          filter(Period == p, Site == site, `Post name` == post) %>%
+          pull(all_of(amount_col))
+        if (!length(vals)) return(NA_real_)
+        sum(as.numeric(vals), na.rm = TRUE)
+      }, numeric(1))
+    }
+
+    numeric_cols <- setdiff(names(wide_df), "Period")
+    total_row <- tibble(Period = "TOTAL")
+    for (nm in numeric_cols) {
+      total_row[[nm]] <- sum(wide_df[[nm]], na.rm = TRUE)
+    }
+    wide_df <- bind_rows(wide_df, total_row)
+
+    site_counts <- posts_by_site %>% count(Site, name = "n_posts")
+    header_top <- tags$tr(
+      tags$th(rowspan = 2, "Period"),
+      lapply(seq_len(nrow(site_counts)), function(i) {
+        tags$th(colspan = site_counts$n_posts[i], site_counts$Site[i], style = "text-align:center;")
+      })
+    )
+    header_bottom <- tags$tr(
+      lapply(seq_len(nrow(posts_by_site)), function(i) {
+        tags$th(posts_by_site$`Post name`[i])
+      })
+    )
+    table_header <- withTags(table(class = "display", thead(header_top, header_bottom)))
+
+    dt <- datatable(
+      wide_df,
+      rownames = FALSE,
+      container = table_header,
+      selection = "none",
+      options = list(
+        pageLength = 25,
+        lengthMenu = list(c(25, 50, 100, -1), c("25", "50", "100", "All")),
+        stateSave = TRUE,
+        searching = FALSE,
+        ordering = FALSE,
+        scrollX = TRUE,
+        rowCallback = JS(
+          "function(row, data) {",
+          "  if (data[0] === 'TOTAL') {",
+          "    $(row).css({'font-weight':'700','background-color':'#f1f1f1'});",
+          "  }",
+          "}"
+        )
+      )
+    )
+
+    if (length(numeric_cols) > 0) {
+      dt <- dt %>% formatRound(columns = numeric_cols, digits = 2, interval = 3, mark = ",")
+    }
+
+    dt
   })
 
   selected_post_id <- reactive({
@@ -2602,9 +2750,9 @@ server <- function(input, output, session) {
     n_flagged <- sum(rv$posts$needs_amendment, na.rm = TRUE)
     export_name <- ifelse(nzchar(workbook_name_effective()), workbook_name_effective(), "Budget")
     if (n_flagged > 0) {
-      actionButton("export_xlsx", "Export blocked: amend posts first", class = "btn-warning")
+      actionButton("export_xlsx", "Export blocked: amend posts first", class = "btn-warning", width = "100%")
     } else {
-      actionButton("export_xlsx", paste0("Export ", export_name, ".xlsx"), class = "btn-primary")
+      actionButton("export_xlsx", paste0("Export ", export_name, ".xlsx"), class = "btn-primary", width = "100%")
     }
   })
 
