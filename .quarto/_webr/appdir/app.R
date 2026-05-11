@@ -501,6 +501,11 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
   } else {
     fte_monthly_total <- rep(as.numeric(fte_monthly_total), length.out = n_months)
   }
+  fte_yearly_total <- vapply(seq_len(n_years), function(i) {
+    idx_start <- (i - 1) * 12 + 1
+    idx_end <- min(i * 12, n_months)
+    sum(fte_monthly_total[idx_start:idx_end], na.rm = TRUE)
+  }, numeric(1))
 
   # Issue #4: Generate salary objects for identifier$total_m access
   salary_objs <- list()
@@ -515,6 +520,8 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
     months = months,
     fte_monthly_total = fte_monthly_total,
     fte_monthly_sum = sum(fte_monthly_total, na.rm = TRUE),
+    fte_yearly_total = fte_yearly_total,
+    fte_yearly_sum = sum(fte_yearly_total, na.rm = TRUE),
     inflation_month_factors = inflation_month_factors,
     inflation_year_factors = inflation_year_factors,
     apply_inflation_month = function(base_value) {
@@ -2373,7 +2380,7 @@ server <- function(input, output, session) {
       )
     } else if (mode == "function") {
       tagList(
-        textInput("function_expr", "Amount formula expression", value = isolate(rv$function_expr_draft), placeholder = "Expression using n, FTE, salary_identifier$total_m and inflation helpers"),
+        textInput("function_expr", "Amount formula expression", value = isolate(rv$function_expr_draft), placeholder = "Expression using n, FTE, fte_monthly_total/fte_yearly_total, salary_identifier$total_m and inflation helpers"),
         actionButton("show_formula_help", "Help: available formula variables")
       )
     } else {
@@ -2614,13 +2621,25 @@ server <- function(input, output, session) {
       ))
     }
 
-    amount_col <- if ("Amount" %in% names(long_df)) "Amount" else if ("Value" %in% names(long_df)) "Value" else NULL
+    # Remove summary row before pivoting wide columns.
+    data_rows <- long_df %>% filter(Period != "TOTAL")
+    if (!nrow(data_rows)) {
+      return(list(
+        data = tibble(Period = character()),
+        sites = character(),
+        posts_by_site = list(),
+        spacer_cols = character(),
+        numeric_cols = character()
+      ))
+    }
+
+    amount_col <- if ("Amount" %in% names(data_rows)) "Amount" else if ("Value" %in% names(data_rows)) "Value" else NULL
     if (is.null(amount_col)) stop("No amount column found in table data.")
 
-    periods_vec <- unique(long_df$Period)
-    sites_vec <- unique(long_df$Site)
+    periods_vec <- unique(data_rows$Period)
+    sites_vec <- unique(data_rows$Site)
     posts_by_site <- lapply(sites_vec, function(site) {
-      unique(long_df$`Post name`[long_df$Site == site])
+      unique(data_rows$`Post name`[data_rows$Site == site])
     })
     names(posts_by_site) <- sites_vec
 
@@ -2635,7 +2654,7 @@ server <- function(input, output, session) {
       for (post in posts_by_site[[site]]) {
         col_name <- paste(site, post, sep = " > ")
         wide_df[[col_name]] <- vapply(periods_vec, function(p) {
-          vals <- long_df %>%
+          vals <- data_rows %>%
             filter(Period == p, Site == site, `Post name` == post) %>%
             pull(all_of(amount_col))
           if (!length(vals)) return(NA_real_)
@@ -2658,6 +2677,22 @@ server <- function(input, output, session) {
         spacer_cols <- c(spacer_cols, spacer_col)
       }
     }
+
+    site_total_cols <- grep(" > Site total$", names(wide_df), value = TRUE)
+    grand_spacer <- strrep(" ", length(sites_vec) + 1)
+    while (grand_spacer %in% names(wide_df)) {
+      grand_spacer <- paste0(grand_spacer, " ")
+    }
+    wide_df[[grand_spacer]] <- ""
+    spacer_cols <- c(spacer_cols, grand_spacer)
+
+    grand_total_col <- "All sites > Total"
+    if (length(site_total_cols) > 0) {
+      wide_df[[grand_total_col]] <- rowSums(as.matrix(wide_df[, site_total_cols, drop = FALSE]), na.rm = TRUE)
+    } else {
+      wide_df[[grand_total_col]] <- NA_real_
+    }
+    numeric_cols <- c(numeric_cols, grand_total_col)
 
     total_row <- as.list(rep(NA, ncol(wide_df)))
     names(total_row) <- names(wide_df)
@@ -2706,10 +2741,12 @@ server <- function(input, output, session) {
       tags$th(rowspan = 2, "Period"),
       lapply(seq_len(nrow(site_counts)), function(i) {
         tagList(
-          tags$th(colspan = site_counts$n_posts[i] + 1, site_counts$Site[i], style = "text-align:center;border-right:2px solid #777;"),
+          tags$th(colspan = site_counts$n_posts[i] + 1, site_counts$Site[i], style = "text-align:center;"),
           if (i < nrow(site_counts)) tags$th(rowspan = 2, "", style = "min-width:16px;width:16px;border:none;background:#fff;")
         )
-      })
+      }),
+      tags$th(rowspan = 2, "", style = "min-width:16px;width:16px;border:none;background:#fff;"),
+      tags$th(colspan = 1, "All sites", style = "text-align:center;")
     )
     header_bottom <- tags$tr(
       unlist(lapply(seq_len(nrow(site_counts)), function(i) {
@@ -2720,7 +2757,8 @@ server <- function(input, output, session) {
           list(tags$th("Site total", style = "font-weight:700;"))
         )
       })
-      , recursive = FALSE)
+      , recursive = FALSE),
+      tags$th("Total", style = "font-weight:700;")
     )
     table_header <- withTags(table(class = "display", thead(header_top, header_bottom)))
 
@@ -2728,7 +2766,7 @@ server <- function(input, output, session) {
       wide_df,
       rownames = FALSE,
       container = table_header,
-      selection = "none",
+      selection = list(mode = "single", target = "cell"),
       options = list(
         pageLength = 25,
         lengthMenu = list(c(25, 50, 100, -1), c("25", "50", "100", "All")),
@@ -2754,6 +2792,47 @@ server <- function(input, output, session) {
   })
 
   selected_post_id <- reactive({
+    if (identical(input$display_form, "wide")) {
+      sel <- input$wide_form_table_cells_selected
+      long_tbl <- filtered_posts()
+      if (is.null(sel) || !length(sel) || !nrow(long_tbl)) return(NA_integer_)
+
+      col_idx <- NA_integer_
+      if (is.matrix(sel) || is.data.frame(sel)) {
+        if (!is.null(colnames(sel)) && "col" %in% colnames(sel)) {
+          col_idx <- as.integer(sel[1, "col"])
+        } else if (ncol(sel) >= 2) {
+          col_idx <- as.integer(sel[1, 2])
+        }
+      }
+      if (is.na(col_idx)) return(NA_integer_)
+
+      # DT cell selection reports zero-based column indices; convert to R's one-based indexing.
+      col_idx <- col_idx + 1L
+
+      wide_obj <- build_wide_from_long(long_tbl)
+      wide_cols <- names(wide_obj$data)
+      if (col_idx < 1 || col_idx > length(wide_cols)) return(NA_integer_)
+
+      col_name <- wide_cols[[col_idx]]
+      if (identical(col_name, "Period") || col_name %in% wide_obj$spacer_cols || grepl("Site total$", col_name) || identical(col_name, "All sites > Total")) {
+        return(NA_integer_)
+      }
+
+      parts <- strsplit(col_name, " > ", fixed = TRUE)[[1]]
+      if (length(parts) < 2) return(NA_integer_)
+      site_name <- parts[[1]]
+      post_label <- paste(parts[-1], collapse = " > ")
+
+      ids <- rv$posts %>%
+        filter(center == site_name, post_name == post_label) %>%
+        pull(id) %>%
+        unique()
+
+      if (length(ids) != 1) return(NA_integer_)
+      return(ids[[1]])
+    }
+
     sel <- input$posts_table_rows_selected
     tbl <- filtered_posts()
     if (!length(sel) || !nrow(tbl)) return(NA_integer_)
@@ -2770,7 +2849,12 @@ server <- function(input, output, session) {
 
   observeEvent(input$edit_selected, {
     sid <- selected_post_id()
-    req(!is.na(sid))
+    if (is.na(sid)) {
+      if (identical(input$display_form, "wide")) {
+        rv$form_error_text <- "Select a specific post column in Wide view to edit. Site/grand total columns are not editable."
+      }
+      return()
+    }
 
     row <- rv$posts %>% filter(id == sid)
     req(nrow(row) == 1)
@@ -2808,7 +2892,12 @@ server <- function(input, output, session) {
 
   observeEvent(input$delete_selected, {
     sid <- selected_post_id()
-    req(!is.na(sid))
+    if (is.na(sid)) {
+      if (identical(input$display_form, "wide")) {
+        rv$form_error_text <- "Select a specific post column in Wide view to delete. Site/grand total columns are not deletable."
+      }
+      return()
+    }
     rv$posts <- rv$posts %>% filter(id != sid)
     set_success("Post deleted.")
   })
@@ -3000,6 +3089,8 @@ server <- function(input, output, session) {
         tags$li(tags$b("months"), " - month vector for current post date range"),
         tags$li(tags$b("fte_monthly_total"), " - vector of summed FTE across all posts for each month in the current post range"),
         tags$li(tags$b("fte_monthly_sum"), " - scalar sum of fte_monthly_total"),
+        tags$li(tags$b("fte_yearly_total"), " - year vector (post-year buckets) of summed FTE across all posts"),
+        tags$li(tags$b("fte_yearly_sum"), " - scalar sum of fte_yearly_total"),
         tags$li(tags$b("inflation_pct"), " - yearly inflation percentage"),
         tags$li(tags$b("inflation_month_factors"), " - month-wise multipliers based on calendar year relative to the first selected month"),
         tags$li(tags$b("inflation_year_factors"), " - year-wise multipliers"),
@@ -3149,22 +3240,46 @@ server <- function(input, output, session) {
 
     # Add a site-total column immediately after each site's post columns.
     ordered_cols <- "Period"
+    site_total_cols <- character(0)
     for (site in unique(data_rows$Site)) {
       prefix  <- paste0(site, " > ")
       pcols   <- names(wide)[startsWith(names(wide), prefix)]
       if (length(pcols) == 0) next
       tcol <- paste0(site, " > Site total")
       wide[[tcol]] <- rowSums(as.matrix(wide[, pcols, drop = FALSE]), na.rm = TRUE)
+      site_total_cols <- c(site_total_cols, tcol)
       ordered_cols <- c(ordered_cols, pcols, tcol)
     }
+
+    grand_spacer <- strrep(" ", length(unique(data_rows$Site)) + 1)
+    while (grand_spacer %in% names(wide)) {
+      grand_spacer <- paste0(grand_spacer, " ")
+    }
+    wide[[grand_spacer]] <- ""
+    ordered_cols <- c(ordered_cols, grand_spacer)
+
+    grand_total_col <- "All sites > Total"
+    if (length(site_total_cols) > 0) {
+      wide[[grand_total_col]] <- rowSums(as.matrix(wide[, site_total_cols, drop = FALSE]), na.rm = TRUE)
+    } else {
+      wide[[grand_total_col]] <- NA_real_
+    }
+    ordered_cols <- c(ordered_cols, grand_total_col)
+
     wide <- wide[, ordered_cols, drop = FALSE]
 
     # Append a grand TOTAL row.
-    num_cols <- setdiff(ordered_cols, "Period")
-    total_vals <- lapply(num_cols, function(col) sum(wide[[col]], na.rm = TRUE))
-    names(total_vals) <- num_cols
-    total_row <- tibble::as_tibble(c(list(Period = "TOTAL"), total_vals))
-    dplyr::bind_rows(wide, total_row)
+    num_cols <- names(wide)[vapply(wide, is.numeric, logical(1))]
+    total_row <- as.list(rep(NA, ncol(wide)))
+    names(total_row) <- names(wide)
+    total_row$Period <- "TOTAL"
+    for (col in num_cols) {
+      total_row[[col]] <- sum(wide[[col]], na.rm = TRUE)
+    }
+    for (col in names(wide)[vapply(wide, is.character, logical(1))]) {
+      if (grepl("^\\s+$", col)) total_row[[col]] <- ""
+    }
+    dplyr::bind_rows(wide, tibble::as_tibble(total_row))
   }
 
   to_js_sheet <- function(df, has_total_row = FALSE) {
