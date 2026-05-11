@@ -76,6 +76,35 @@ make_empty_salaries <- function() {
   )
 }
 
+make_default_salaries <- function() {
+  ry   <- calc_salary_fields(12000,  "month", "percentage",  0,     0)
+  cr   <- calc_salary_fields(48500,  "month", "percentage", 19.36, 33.3)
+  tibble(
+    id                                      = 1L:2L,
+    identifier                              = c("research_year", "clinical_researcher"),
+    name                                    = c("Research year", "Clinical Researcher"),
+    unit                                    = c("month", "month"),
+    base_salary                             = c(12000, 48500),
+    pension_mode                            = c("percentage", "percentage"),
+    pension_value                           = c(0, 19.36),
+    own_pension_pct                         = c(0, 33.3),
+    base_salary_monthly                     = c(ry$base_salary_monthly, cr$base_salary_monthly),
+    pension_amount_monthly                  = c(ry$pension_amount_monthly, cr$pension_amount_monthly),
+    own_pension_amount_monthly              = c(ry$own_pension_amount_monthly, cr$own_pension_amount_monthly),
+    holiday_allowance_total_monthly         = c(ry$holiday_allowance_total_monthly, cr$holiday_allowance_total_monthly),
+    holiday_allowance_monthly               = c(ry$holiday_allowance_monthly, cr$holiday_allowance_monthly),
+    total_salary_monthly                    = c(ry$total_salary_monthly, cr$total_salary_monthly),
+    total_salary_holidays_deducted_monthly  = c(ry$total_salary_holidays_deducted_monthly, cr$total_salary_holidays_deducted_monthly),
+    base_salary_yearly                      = c(ry$base_salary_yearly, cr$base_salary_yearly),
+    pension_amount_yearly                   = c(ry$pension_amount_yearly, cr$pension_amount_yearly),
+    own_pension_amount_yearly               = c(ry$own_pension_amount_yearly, cr$own_pension_amount_yearly),
+    holiday_allowance_total_yearly          = c(ry$holiday_allowance_total_yearly, cr$holiday_allowance_total_yearly),
+    holiday_allowance_yearly                = c(ry$holiday_allowance_yearly, cr$holiday_allowance_yearly),
+    total_salary_yearly                     = c(ry$total_salary_yearly, cr$total_salary_yearly),
+    total_salary_holidays_deducted_yearly   = c(ry$total_salary_holidays_deducted_yearly, cr$total_salary_holidays_deducted_yearly)
+  )
+}
+
 make_default_categories <- function() {
   tibble(
     id = 1:19,
@@ -980,9 +1009,21 @@ ui <- fluidPage(
       font-weight: 700;
       margin-left: 4px;
     }
+    @media (min-width: 768px) {
+      .sidebar-split-row {
+        margin-left: -15px;
+        margin-right: -15px;
+      }
+      .sidebar-split-left {
+        padding: 0 5px 0 15px;
+      }
+      .sidebar-split-right {
+        padding: 0 15px 0 5px;
+      }
+    }
     "
   ))),
-  tags$head(tags$script(src = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js")),
+  tags$head(tags$script(src = "https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js")),
   tags$head(tags$script(HTML(
     "
     Shiny.addCustomMessageHandler('download-xlsx', function(payload) {
@@ -991,14 +1032,138 @@ ui <- fluidPage(
         return;
       }
 
+      function writeWorkbookBlob(workbook) {
+        try {
+          var workbookBytes = XLSX.write(workbook, {
+            bookType: 'xlsx',
+            bookSST: false,
+            type: 'array'
+          });
+          return new Blob([
+            workbookBytes
+          ], {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+          });
+        } catch (arrayError) {
+          var binary = XLSX.write(workbook, {
+            bookType: 'xlsx',
+            bookSST: false,
+            type: 'binary'
+          });
+          var buffer = new ArrayBuffer(binary.length);
+          var view = new Uint8Array(buffer);
+          for (var i = 0; i < binary.length; i++) {
+            view[i] = binary.charCodeAt(i) & 0xFF;
+          }
+          return new Blob([
+            buffer
+          ], {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+          });
+        }
+      }
+
+      function downloadWorkbook(workbook, filename) {
+        var safeName = filename || 'Budget.xlsx';
+
+        try {
+          if (typeof XLSX.writeFile === 'function') {
+            XLSX.writeFile(workbook, safeName, { bookType: 'xlsx', bookSST: false });
+            return;
+          }
+        } catch (writeFileError) {
+          console.warn('XLSX.writeFile failed, falling back to Blob download.', writeFileError);
+        }
+
+        var blob = writeWorkbookBlob(workbook);
+        var link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = safeName;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        setTimeout(function() {
+          URL.revokeObjectURL(link.href);
+        }, 1000);
+      }
+
       var wb = XLSX.utils.book_new();
+
       Object.keys(payload.sheets).forEach(function(sheetName) {
-        var rows = payload.sheets[sheetName] || [];
-        var ws = XLSX.utils.json_to_sheet(rows);
+        var sheetInfo = payload.sheets[sheetName];
+        var rows = Array.isArray(sheetInfo) ? sheetInfo : (sheetInfo.rows || []);
+        var rawCols = Array.isArray(sheetInfo) ? [] : (sheetInfo.columns || []);
+        // Guard: Shiny may serialise a length-1 R character vector as a scalar
+        // string instead of a one-element array.
+        var columns = Array.isArray(rawCols) ? rawCols : (rawCols ? [rawCols] : []);
+        var meta = Array.isArray(sheetInfo) ? {} : (sheetInfo.meta || {});
+
+        var ws;
+        var colNames;
+
+        if (columns.length > 0) {
+          var aoa = [columns].concat(rows.map(function(row) {
+            return columns.map(function(_, idx) {
+              return Array.isArray(row) ? row[idx] : null;
+            });
+          }));
+          ws = XLSX.utils.aoa_to_sheet(aoa);
+          colNames = columns.slice();
+        } else {
+          ws = XLSX.utils.json_to_sheet(rows);
+          colNames = rows.length > 0 ? Object.keys(rows[0]) : [];
+        }
+
+        if (rows.length > 0) {
+          var range = XLSX.utils.decode_range(ws['!ref']);
+
+          // Collect total column indices (0-based)
+          var totalColIdx = [];
+          colNames.forEach(function(name, idx) {
+            if (/total/i.test(name)) totalColIdx.push(idx);
+          });
+
+          // Total row: last data row when meta.hasTotalRow is true
+          var totalRowSheetIdx = (meta.hasTotalRow && rows.length > 0)
+            ? range.e.r  // last row in sheet = header + data rows - 1
+            : -1;
+
+          for (var R = range.s.r; R <= range.e.r; R++) {
+            for (var C = range.s.c; C <= range.e.c; C++) {
+              var addr = XLSX.utils.encode_cell({r: R, c: C});
+              if (!ws[addr]) ws[addr] = {v: '', t: 's'};
+
+              var isHeader   = (R === range.s.r);
+              var isTotalRow = (R === totalRowSheetIdx);
+              var isTotalCol = totalColIdx.indexOf(C) !== -1;
+              var bold = isTotalRow || (isHeader && isTotalCol) || isTotalCol;
+
+              if (bold || isTotalRow) {
+                ws[addr].s = {
+                  font: { bold: bold },
+                  border: isTotalRow ? {
+                    top:    { style: 'thin',   color: { rgb: 'FF000000' } },
+                    bottom: { style: 'double', color: { rgb: 'FF000000' } }
+                  } : {}
+                };
+              }
+            }
+          }
+
+          // Merged header spans
+          if (meta.merges && meta.merges.length > 0) {
+            ws['!merges'] = meta.merges;
+          }
+        }
+
         XLSX.utils.book_append_sheet(wb, ws, sheetName);
       });
 
-      XLSX.writeFile(wb, payload.filename || 'Budget.xlsx');
+      try {
+        downloadWorkbook(wb, payload.filename || 'Budget.xlsx');
+      } catch (downloadError) {
+        console.error('Workbook export failed.', downloadError);
+      }
     });
     "
   ))),
@@ -1028,7 +1193,7 @@ ui <- fluidPage(
         class = "import-file-wrap",
         fileInput("import_file", NULL, accept = ".xlsx", width = "100%")
       ),
-      tags$p("Continue where you left off", style = "font-size: 0.85em; color: #666; margin: 4px 0; text-align: left;")
+      tags$p("...to continue where you left off", style = "font-size: 0.85em; color: #666; margin: 4px 0; text-align: left;")
     ),
     column(4, style = "padding: 0 15px;",
       tags$label(strong("Export workbook")),
@@ -1058,7 +1223,13 @@ ui <- fluidPage(
     sidebarPanel(
       h4("Add or edit post"),
       selectInput("template_name", "Template", choices = make_default_templates()$name, selected = "Custom"),
-      actionButton("apply_template", "Apply template"),
+      actionButton("apply_template", "Apply template", style = "width: 100%; margin-bottom: 4px;"),
+      tags$div(
+        class = "row sidebar-split-row",
+        tags$div(class = "col-sm-6 sidebar-split-left", actionButton("edit_template_btn", "Edit template", style = "width: 100%;")),
+        tags$div(class = "col-sm-6 sidebar-split-right", actionButton("save_as_template_btn", "Save template", class = "btn-success", style = "width: 100%;"))
+      ),
+      tags$hr(style = "margin: 8px 0;"),
       textInput("post_name", required_label("Post name")),
       selectInput("center", required_label("Site"), choices = make_default_sites()$name, selected = "Main"),
       selectInput("category", required_label("Category"), choices = c("", make_default_categories()$name), selected = ""),
@@ -1071,13 +1242,16 @@ ui <- fluidPage(
       textAreaInput("note", "Note", value = "", rows = 2),
       tags$div(style = "font-size:0.8em;color:#b00020;margin-top:-4px;", "* = required"),
       fluidRow(
-        column(12, actionButton("add_or_update", "Add / Update", class = "btn-primary"))
+        column(12, actionButton("add_or_update", "Save budget post", class = "btn-primary", style = "width: 100%;"))
       ),
       uiOutput("form_error"),
       uiOutput("success_feedback"),
       br(),
-      actionButton("edit_selected", "Edit selected post"),
-      actionButton("delete_selected", "Delete selected post", class = "btn-danger")
+      tags$div(
+        class = "row sidebar-split-row",
+        tags$div(class = "col-sm-6 sidebar-split-left", actionButton("edit_selected", "Edit post", style = "width: 100%;")),
+        tags$div(class = "col-sm-6 sidebar-split-right", actionButton("delete_selected", "Delete post", class = "btn-danger", style = "width: 100%;"))
+      )
     ),
     mainPanel(
       tabsetPanel(
@@ -1221,20 +1395,7 @@ ui <- fluidPage(
             column(12,
               DTOutput("templates_table"),
               br(),
-              fluidRow(
-                column(3, textInput("tpl_name", "Template Name")),
-                column(3, selectInput("tpl_category", "Category", choices = c("", make_default_categories()$name), selected = "")),
-                column(3, selectInput("tpl_mode", "Mode", choices = c("constant", "function", "variable"), selected = "constant")),
-                column(3, selectInput("tpl_unit", "Unit", choices = c("month", "year"), selected = "month"))
-              ),
-              fluidRow(
-                column(12, textAreaInput("tpl_note", "Note", rows = 2))
-              ),
-              fluidRow(
-                column(4, actionButton("tpl_add", "Add", class = "btn-primary")),
-                column(4, actionButton("tpl_edit_selected", "Edit")),
-                column(4, tags$div())
-              ),
+              tags$p(tags$em("To add or edit a template, use the 'Save template' button in the Add post panel.")),
               fluidRow(
                 column(4, actionButton("tpl_delete_selected", "Delete Template", class = "btn-danger")),
                 column(4, actionButton("tpl_clear_all", "Clear All Templates", class = "btn-warning")),
@@ -1253,7 +1414,7 @@ ui <- fluidPage(
 server <- function(input, output, session) {
   rv <- reactiveValues(
     posts = make_empty_posts(),
-    salaries = make_empty_salaries(),
+    salaries = make_default_salaries(),
     workbook_name = "Budget",
     workbook_name_error = NULL,
     site_registry = make_default_sites(),
@@ -1263,7 +1424,7 @@ server <- function(input, output, session) {
     next_category_id = max(make_default_categories()$id, na.rm = TRUE) + 1L,
     next_template_id = 5L,
     next_id = 1L,
-    next_salary_id = 1L,
+    next_salary_id = 3L,
     editing_id = NA_integer_,
     editing_salary_id = NA_integer_,
     editing_site_id = NA_integer_,
@@ -1272,6 +1433,7 @@ server <- function(input, output, session) {
     variable_defaults = numeric(),
     constant_expr_draft = "0",
     function_expr_draft = "rep((510000*FTE)/12, n)",
+    value_inputs_refresh = 0L,
     form_error_text = NULL,
     salary_error_text = NULL,
     budget_error_text = NULL,
@@ -1329,6 +1491,7 @@ server <- function(input, output, session) {
     updateTextInput(session, "constant_expr", value = "0")
     updateTextInput(session, "function_expr", value = "rep((510000*FTE)/12, n)")
     updateTextAreaInput(session, "note", value = "")
+    rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L
     refresh_post_field_labels()
   }
 
@@ -1440,15 +1603,24 @@ server <- function(input, output, session) {
         category = as.character(category),
         mode = as.character(mode),
         unit = as.character(unit),
+        constant_expr = if ("constant_expr" %in% names(.)) as.character(constant_expr) else "0",
+        function_expr = if ("function_expr" %in% names(.)) as.character(function_expr) else "rep(0, n)",
         is_default = as.logical(is_default),
         is_deleted = as.logical(is_deleted)
+      ) %>%
+      mutate(
+        Amount = case_when(
+          mode == "constant" ~ constant_expr,
+          mode == "function" ~ function_expr,
+          TRUE ~ "variable"
+        )
       )
 
     datatable(
       tpl_tbl %>%
         filter(!is_deleted) %>%
-        select(name, category, mode, unit),
-      colnames = c("Name", "Category", "Mode", "Unit"),
+        select(name, category, Amount, unit),
+      colnames = c("Name", "Category", "Amount", "Unit"),
       selection = "single",
       rownames = FALSE,
       options = list(pageLength = 10)
@@ -2096,8 +2268,89 @@ server <- function(input, output, session) {
     vals <- tpl$values[[1]]
     rv$variable_defaults <- if (is.null(vals)) numeric() else as.numeric(vals)
     rv$amend_fields <- character(0)
+    rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L
     refresh_post_field_labels()
     set_success(paste("Template applied:", input$template_name))
+  })
+
+  observeEvent(input$edit_template_btn, {
+    tpl <- rv$template_registry %>% filter(!is_deleted, name == input$template_name) %>% slice(1)
+    req(nrow(tpl) == 1)
+    rv$editing_template_id <- tpl$id
+    rv$constant_expr_draft <- tpl$constant_expr
+    rv$function_expr_draft <- tpl$function_expr
+    rv$variable_defaults <- if (is.null(tpl$values[[1]])) numeric() else as.numeric(tpl$values[[1]])
+    updateTextInput(session, "post_name", value = tpl$name)
+    updateSelectInput(session, "center", selected = tpl$center)
+    updateSelectInput(session, "category", selected = tpl$category)
+    updateSelectInput(session, "value_mode", selected = tpl$mode)
+    updateSelectInput(session, "value_unit", selected = tpl$unit)
+    updateNumericInput(session, "fte", value = tpl$fte)
+    updateTextAreaInput(session, "note", value = tpl$note)
+    if (!is.na(tpl$duration_years)) {
+      updateDateInput(session, "post_start", value = input$budget_start)
+      updateDateInput(session, "post_end", value = input$budget_start %m+% years(as.integer(tpl$duration_years)) - days(1))
+    }
+    rv$amend_fields <- character(0)
+    rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L
+    refresh_post_field_labels()
+    set_success(paste("Template loaded for editing:", tpl$name, "— modify fields then click 'Save as template'."))
+  })
+
+  observeEvent(input$save_as_template_btn, {
+    rv$templates_error_text <- NULL
+    nm <- trimws(if (!is.null(input$post_name)) input$post_name else "")
+    if (!nzchar(nm)) {
+      rv$templates_error_text <- "Post name is used as template name — please fill in Post name first."
+      return()
+    }
+
+    is_new <- is.na(rv$editing_template_id)
+    tpl_id <- if (is_new) rv$next_template_id else rv$editing_template_id
+    prev <- rv$template_registry %>% filter(id == tpl_id)
+    prev_default <- if (nrow(prev) == 1) isTRUE(prev$is_default) else FALSE
+
+    dup <- rv$template_registry %>% filter(!is_deleted, id != tpl_id, tolower(name) == tolower(nm))
+    if (nrow(dup) > 0) {
+      rv$templates_error_text <- "A template with that name already exists."
+      return()
+    }
+
+    dur_years <- tryCatch({
+      if (!is.null(input$post_start) && !is.null(input$post_end) && !is.na(input$post_start) && !is.na(input$post_end)) {
+        as.numeric(difftime(as.Date(input$post_end), as.Date(input$post_start), units = "days")) / 365.25
+      } else {
+        NA_real_
+      }
+    }, error = function(e) NA_real_)
+
+    n_vals <- isolate(required_value_count())
+    var_vals <- lapply(seq_len(n_vals), function(i) {
+      v <- input[[paste0("var_value_", i)]]
+      if (is.null(v) || is.na(v)) 0 else as.numeric(v)
+    })
+
+    new_tpl <- tibble(
+      id             = as.integer(tpl_id),
+      name           = nm,
+      category       = if (!is.null(input$category)) input$category else "",
+      center         = if (!is.null(input$center)) input$center else "",
+      mode           = if (!is.null(input$value_mode)) input$value_mode else "constant",
+      unit           = if (!is.null(input$value_unit)) input$value_unit else "month",
+      constant_expr  = rv$constant_expr_draft,
+      function_expr  = rv$function_expr_draft,
+      fte            = if (!is.null(input$fte)) as.numeric(input$fte) else NA_real_,
+      note           = if (!is.null(input$note)) input$note else "",
+      values         = list(unlist(var_vals)),
+      duration_years = dur_years,
+      is_default     = prev_default,
+      is_deleted     = FALSE
+    )
+
+    rv$template_registry <- rv$template_registry %>% filter(id != tpl_id) %>% bind_rows(new_tpl)
+    if (is_new) rv$next_template_id <- rv$next_template_id + 1L
+    rv$editing_template_id <- NA_integer_
+    set_success(if (is_new) paste("Template saved:", nm) else paste("Template updated:", nm))
   })
 
   required_value_count <- reactive({
@@ -2112,14 +2365,15 @@ server <- function(input, output, session) {
 
   output$value_inputs_ui <- renderUI({
     mode <- input$value_mode
+    rv$value_inputs_refresh  # reactive dependency for programmatic refresh
 
     if (mode == "constant") {
       tagList(
-        textInput("constant_expr", "Constant amount expression", value = rv$constant_expr_draft, placeholder = "Example: 510000*FTE")
+        textInput("constant_expr", "Constant amount expression", value = isolate(rv$constant_expr_draft), placeholder = "Example: 510000*FTE")
       )
     } else if (mode == "function") {
       tagList(
-        textInput("function_expr", "Amount formula expression", value = rv$function_expr_draft, placeholder = "Expression using n, FTE, salary_identifier$total_m and inflation helpers"),
+        textInput("function_expr", "Amount formula expression", value = isolate(rv$function_expr_draft), placeholder = "Expression using n, FTE, salary_identifier$total_m and inflation helpers"),
         actionButton("show_formula_help", "Help: available formula variables")
       )
     } else {
@@ -2546,6 +2800,7 @@ server <- function(input, output, session) {
       site_registry = rv$site_registry
     )
     rv$amend_fields <- amend_fields
+    rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L
     refresh_post_field_labels()
 
     set_success("Post loaded into form for editing.")
@@ -2839,7 +3094,7 @@ server <- function(input, output, session) {
     if (!("Category" %in% squash)) group_cols <- c(group_cols, "Category")
     if (length(group_cols) == 0) group_cols <- "Period"
 
-    out %>%
+    out <- out %>%
       group_by(across(all_of(group_cols))) %>%
       summarise(
         Period = if ("Period" %in% group_cols) first(Period) else "All periods",
@@ -2858,20 +3113,72 @@ server <- function(input, output, session) {
         `End date` = as.character(`End date`)
       ) %>%
       arrange(Site, `Post name`, Period)
+
+    total_row <- tibble(
+      Period = "TOTAL",
+      `Post name` = "",
+      Site = "",
+      Category = "",
+      Note = "",
+      `Start Date` = NA_character_,
+      `End date` = NA_character_,
+      FTE = NA_real_,
+      Amount = sum(out$Amount, na.rm = TRUE)
+    )
+    bind_rows(out, total_row)
   }
 
   build_export_wide_sheet <- function(period_choice) {
     long_df <- build_export_sheet(period_choice)
-    if (!nrow(long_df)) {
-      return(tibble(Period = character()))
+    if (!nrow(long_df)) return(tibble(Period = character()))
+
+    # Strip the TOTAL summary row before pivoting – build_wide_from_long adds
+    # Site=="" / Post name=="" which turns into spurious empty-site columns.
+    data_rows <- dplyr::filter(long_df, Period != "TOTAL")
+    if (!nrow(data_rows)) return(tibble(Period = character()))
+
+    # Pivot each post to its own column.
+    wide <- tidyr::pivot_wider(
+      dplyr::select(data_rows, Period, Site, `Post name`, Amount),
+      names_from  = c(Site, `Post name`),
+      values_from = Amount,
+      names_sep   = " > ",
+      values_fn   = sum,
+      values_fill = NA_real_
+    )
+
+    # Add a site-total column immediately after each site's post columns.
+    ordered_cols <- "Period"
+    for (site in unique(data_rows$Site)) {
+      prefix  <- paste0(site, " > ")
+      pcols   <- names(wide)[startsWith(names(wide), prefix)]
+      if (length(pcols) == 0) next
+      tcol <- paste0(site, " > Site total")
+      wide[[tcol]] <- rowSums(as.matrix(wide[, pcols, drop = FALSE]), na.rm = TRUE)
+      ordered_cols <- c(ordered_cols, pcols, tcol)
     }
-    wide_obj <- build_wide_from_long(long_df)
-    wide_obj$data
+    wide <- wide[, ordered_cols, drop = FALSE]
+
+    # Append a grand TOTAL row.
+    num_cols <- setdiff(ordered_cols, "Period")
+    total_vals <- lapply(num_cols, function(col) sum(wide[[col]], na.rm = TRUE))
+    names(total_vals) <- num_cols
+    total_row <- tibble::as_tibble(c(list(Period = "TOTAL"), total_vals))
+    dplyr::bind_rows(wide, total_row)
   }
 
-  to_js_rows <- function(df) {
-    if (!nrow(df)) return(list())
-    lapply(seq_len(nrow(df)), function(i) as.list(df[i, , drop = FALSE]))
+  to_js_sheet <- function(df, has_total_row = FALSE) {
+    list(
+      # as.list() forces a JSON array even when there is only one column name,
+      # preventing Shiny from serialising it as a bare scalar string.
+      columns = as.list(names(df)),
+      rows = if (!nrow(df)) {
+        list()
+      } else {
+        lapply(seq_len(nrow(df)), function(i) unname(as.list(df[i, , drop = FALSE])))
+      },
+      meta = list(hasTotalRow = has_total_row)
+    )
   }
 
   observeEvent(input$export_xlsx, {
@@ -2910,18 +3217,18 @@ server <- function(input, output, session) {
     }
 
     sheets <- list(
-      by_project_year_wide = to_js_rows(build_export_wide_sheet("project_year")),
-      by_project_year_long = to_js_rows(build_export_sheet("project_year")),
-      by_calendar_year_wide = to_js_rows(build_export_wide_sheet("calendar_year")),
-      by_calendar_year_long = to_js_rows(build_export_sheet("calendar_year")),
-      by_month_wide = to_js_rows(build_export_wide_sheet("month")),
-      by_month_long = to_js_rows(build_export_sheet("month")),
-      posts = to_js_rows(serialize_posts(rv$posts)),
-      salaries = to_js_rows(serialize_salaries(rv$salaries)),
-      sites = to_js_rows(serialize_sites(rv$site_registry)),
-      categories = to_js_rows(serialize_categories(rv$category_registry)),
-      templates = to_js_rows(serialize_templates(rv$template_registry)),
-      meta = to_js_rows(tibble(
+      by_project_year_wide  = to_js_sheet(build_export_wide_sheet("project_year"),  has_total_row = TRUE),
+      by_project_year_long  = to_js_sheet(build_export_sheet("project_year"),       has_total_row = TRUE),
+      by_calendar_year_wide = to_js_sheet(build_export_wide_sheet("calendar_year"), has_total_row = TRUE),
+      by_calendar_year_long = to_js_sheet(build_export_sheet("calendar_year"),      has_total_row = TRUE),
+      by_month_wide         = to_js_sheet(build_export_wide_sheet("month"),         has_total_row = TRUE),
+      by_month_long         = to_js_sheet(build_export_sheet("month"),              has_total_row = TRUE),
+      posts                 = to_js_sheet(serialize_posts(rv$posts)),
+      salaries              = to_js_sheet(serialize_salaries(rv$salaries)),
+      sites                 = to_js_sheet(serialize_sites(rv$site_registry)),
+      categories            = to_js_sheet(serialize_categories(rv$category_registry)),
+      templates             = to_js_sheet(serialize_templates(rv$template_registry)),
+      meta                  = to_js_sheet(tibble(
         key = c("budget_start", "budget_end", "inflation_pct", "workbook_name", "schema_version"),
         value = c(as.character(input$budget_start), as.character(input$budget_end), as.character(input$inflation_pct), export_base_name, "2.0")
       ))
