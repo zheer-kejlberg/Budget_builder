@@ -62,49 +62,60 @@ make_empty_salaries <- function() {
     pension_mode = character(),
     pension_value = numeric(),
     own_pension_pct = numeric(),
+    wage_supplement = numeric(),
+    holiday_rate = numeric(),
+    subtract_holiday = logical(),
     base_salary_monthly = numeric(),
+    wage_supplement_monthly = numeric(),
     pension_amount_monthly = numeric(),
     own_pension_amount_monthly = numeric(),
     holiday_allowance_total_monthly = numeric(),
     holiday_allowance_monthly = numeric(),
+    total_plus_holiday_salary_monthly = numeric(),
     total_salary_monthly = numeric(),
-    total_salary_holidays_deducted_monthly = numeric(),
     base_salary_yearly = numeric(),
+    wage_supplement_yearly = numeric(),
     pension_amount_yearly = numeric(),
     own_pension_amount_yearly = numeric(),
     holiday_allowance_total_yearly = numeric(),
     holiday_allowance_yearly = numeric(),
-    total_salary_yearly = numeric(),
-    total_salary_holidays_deducted_yearly = numeric()
+    total_plus_holiday_salary_yearly = numeric(),
+    total_salary_yearly = numeric()
   )
 }
 
 make_default_salaries <- function() {
-  ry   <- calc_salary_fields(12000,  "month", "percentage",  0,     0)
-  cr   <- calc_salary_fields(48500,  "month", "percentage", 19.36, 33.3)
+  ry  <- calc_salary_fields(12000,  "month", "percentage",  0,     0,    wage_supplement = 0, holiday_rate_pct = 0,    subtract_holiday = FALSE)
+  cr  <- calc_salary_fields(48500,  "month", "percentage", 19.36, 33.3, wage_supplement = 0, holiday_rate_pct = 12.5, subtract_holiday = TRUE)
+  phd <- calc_salary_fields(503543, "year",  "percentage", 17.1,  0,    wage_supplement = 0, holiday_rate_pct = 12.5, subtract_holiday = TRUE)
   tibble(
-    id                                      = 1L:2L,
-    identifier                              = c("research_year", "clinical_researcher"),
-    name                                    = c("Research year", "Clinical Researcher"),
-    unit                                    = c("month", "month"),
-    base_salary                             = c(12000, 48500),
-    pension_mode                            = c("percentage", "percentage"),
-    pension_value                           = c(0, 19.36),
-    own_pension_pct                         = c(0, 33.3),
-    base_salary_monthly                     = c(ry$base_salary_monthly, cr$base_salary_monthly),
-    pension_amount_monthly                  = c(ry$pension_amount_monthly, cr$pension_amount_monthly),
-    own_pension_amount_monthly              = c(ry$own_pension_amount_monthly, cr$own_pension_amount_monthly),
-    holiday_allowance_total_monthly         = c(ry$holiday_allowance_total_monthly, cr$holiday_allowance_total_monthly),
-    holiday_allowance_monthly               = c(ry$holiday_allowance_monthly, cr$holiday_allowance_monthly),
-    total_salary_monthly                    = c(ry$total_salary_monthly, cr$total_salary_monthly),
-    total_salary_holidays_deducted_monthly  = c(ry$total_salary_holidays_deducted_monthly, cr$total_salary_holidays_deducted_monthly),
-    base_salary_yearly                      = c(ry$base_salary_yearly, cr$base_salary_yearly),
-    pension_amount_yearly                   = c(ry$pension_amount_yearly, cr$pension_amount_yearly),
-    own_pension_amount_yearly               = c(ry$own_pension_amount_yearly, cr$own_pension_amount_yearly),
-    holiday_allowance_total_yearly          = c(ry$holiday_allowance_total_yearly, cr$holiday_allowance_total_yearly),
-    holiday_allowance_yearly                = c(ry$holiday_allowance_yearly, cr$holiday_allowance_yearly),
-    total_salary_yearly                     = c(ry$total_salary_yearly, cr$total_salary_yearly),
-    total_salary_holidays_deducted_yearly   = c(ry$total_salary_holidays_deducted_yearly, cr$total_salary_holidays_deducted_yearly)
+    id                                = 1L:3L,
+    identifier                        = c("research_year", "clinical_researcher", "phd_student"),
+    name                              = c("Research year", "Clinical Researcher", "PhD student"),
+    unit                              = c("month", "month", "year"),
+    base_salary                       = c(12000, 48500, 503543),
+    pension_mode                      = c("percentage", "percentage", "percentage"),
+    pension_value                     = c(0, 19.36, 17.1),
+    own_pension_pct                   = c(0, 33.3, 0),
+    wage_supplement                   = c(0, 0, 0),
+    holiday_rate                      = c(0, 12.5, 12.5),
+    subtract_holiday                  = c(FALSE, TRUE, TRUE),
+    base_salary_monthly               = c(ry$base_salary_monthly,              cr$base_salary_monthly,              phd$base_salary_monthly),
+    wage_supplement_monthly           = c(ry$wage_supplement_monthly,          cr$wage_supplement_monthly,          phd$wage_supplement_monthly),
+    pension_amount_monthly            = c(ry$pension_amount_monthly,           cr$pension_amount_monthly,           phd$pension_amount_monthly),
+    own_pension_amount_monthly        = c(ry$own_pension_amount_monthly,       cr$own_pension_amount_monthly,       phd$own_pension_amount_monthly),
+    holiday_allowance_total_monthly   = c(ry$holiday_allowance_total_monthly,  cr$holiday_allowance_total_monthly,  phd$holiday_allowance_total_monthly),
+    holiday_allowance_monthly         = c(ry$holiday_allowance_monthly,        cr$holiday_allowance_monthly,        phd$holiday_allowance_monthly),
+    total_plus_holiday_salary_monthly = c(ry$total_plus_holiday_salary_monthly, cr$total_plus_holiday_salary_monthly, phd$total_plus_holiday_salary_monthly),
+    total_salary_monthly              = c(ry$total_salary_monthly,             cr$total_salary_monthly,             phd$total_salary_monthly),
+    base_salary_yearly                = c(ry$base_salary_yearly,               cr$base_salary_yearly,               phd$base_salary_yearly),
+    wage_supplement_yearly            = c(ry$wage_supplement_yearly,           cr$wage_supplement_yearly,           phd$wage_supplement_yearly),
+    pension_amount_yearly             = c(ry$pension_amount_yearly,            cr$pension_amount_yearly,            phd$pension_amount_yearly),
+    own_pension_amount_yearly         = c(ry$own_pension_amount_yearly,        cr$own_pension_amount_yearly,        phd$own_pension_amount_yearly),
+    holiday_allowance_total_yearly    = c(ry$holiday_allowance_total_yearly,   cr$holiday_allowance_total_yearly,   phd$holiday_allowance_total_yearly),
+    holiday_allowance_yearly          = c(ry$holiday_allowance_yearly,         cr$holiday_allowance_yearly,         phd$holiday_allowance_yearly),
+    total_plus_holiday_salary_yearly  = c(ry$total_plus_holiday_salary_yearly, cr$total_plus_holiday_salary_yearly, phd$total_plus_holiday_salary_yearly),
+    total_salary_yearly               = c(ry$total_salary_yearly,              cr$total_salary_yearly,              phd$total_salary_yearly)
   )
 }
 
@@ -151,13 +162,19 @@ make_default_sites <- function() {
   )
 }
 
-calc_salary_fields <- function(base_salary, unit, pension_mode, pension_value, own_pension_pct) {
+calc_salary_fields <- function(base_salary, unit, pension_mode, pension_value, own_pension_pct,
+                               wage_supplement = 0, holiday_rate_pct = 12.5, subtract_holiday = TRUE) {
   base_input <- as.numeric(base_salary)
   own_pct <- as.numeric(own_pension_pct)
+  wage_supp_input <- as.numeric(wage_supplement)
+  holiday_rate <- as.numeric(holiday_rate_pct) / 100
   if (is.na(base_input) || base_input < 0) stop("Base salary must be a non-negative number.", call. = FALSE)
   if (is.na(own_pct) || own_pct < 0) stop("Own part of pension (%) must be a non-negative number.", call. = FALSE)
+  if (is.na(wage_supp_input) || wage_supp_input < 0) stop("Wage supplement must be a non-negative number.", call. = FALSE)
+  if (is.na(holiday_rate) || holiday_rate < 0) stop("Holiday rate must be a non-negative number.", call. = FALSE)
 
   base_monthly <- if (identical(unit, "year")) base_input / 12 else base_input
+  wage_supplement_monthly <- if (identical(unit, "year")) wage_supp_input / 12 else wage_supp_input
 
   pension_amount_monthly <- if (identical(pension_mode, "percentage")) {
     base_monthly * as.numeric(pension_value) / 100
@@ -170,26 +187,31 @@ calc_salary_fields <- function(base_salary, unit, pension_mode, pension_value, o
   }
 
   own_pension_amount_monthly <- pension_amount_monthly * own_pct / 100
-  holiday_allowance_total_monthly <- base_monthly + own_pension_amount_monthly
-  holiday_allowance_monthly <- holiday_allowance_total_monthly / 8
-  total_salary_monthly <- base_monthly + pension_amount_monthly + holiday_allowance_monthly
-  total_salary_holidays_deducted_monthly <- total_salary_monthly * 47 / 52
+  # Holiday applies to base + own pension portion + wage supplement
+  holiday_allowance_total_monthly <- base_monthly + own_pension_amount_monthly + wage_supplement_monthly
+  holiday_allowance_monthly <- holiday_allowance_total_monthly * holiday_rate
+  # Total including holiday but before holiday-absence deduction
+  total_plus_holiday_salary_monthly <- base_monthly + pension_amount_monthly + wage_supplement_monthly + holiday_allowance_monthly
+  # Final total: optionally apply 47/52 to account for holiday absence
+  total_salary_monthly <- if (isTRUE(subtract_holiday)) total_plus_holiday_salary_monthly * 47 / 52 else total_plus_holiday_salary_monthly
 
   list(
     base_salary_monthly = base_monthly,
+    wage_supplement_monthly = wage_supplement_monthly,
     pension_amount_monthly = pension_amount_monthly,
     own_pension_amount_monthly = own_pension_amount_monthly,
     holiday_allowance_total_monthly = holiday_allowance_total_monthly,
     holiday_allowance_monthly = holiday_allowance_monthly,
+    total_plus_holiday_salary_monthly = total_plus_holiday_salary_monthly,
     total_salary_monthly = total_salary_monthly,
-    total_salary_holidays_deducted_monthly = total_salary_holidays_deducted_monthly,
     base_salary_yearly = base_monthly * 12,
+    wage_supplement_yearly = wage_supplement_monthly * 12,
     pension_amount_yearly = pension_amount_monthly * 12,
     own_pension_amount_yearly = own_pension_amount_monthly * 12,
     holiday_allowance_total_yearly = holiday_allowance_total_monthly * 12,
     holiday_allowance_yearly = holiday_allowance_monthly * 12,
-    total_salary_yearly = total_salary_monthly * 12,
-    total_salary_holidays_deducted_yearly = total_salary_holidays_deducted_monthly * 12
+    total_plus_holiday_salary_yearly = total_plus_holiday_salary_monthly * 12,
+    total_salary_yearly = total_salary_monthly * 12
   )
 }
 
@@ -234,10 +256,10 @@ make_salary_lookup <- function(salaries_tbl) {
       own_pension = own_pension_amount_monthly,
       holiday_base = holiday_allowance_total_monthly,
       holiday = holiday_allowance_monthly,
+      total_plus_holiday_m = total_plus_holiday_salary_monthly,
+      total_plus_holiday_y = total_plus_holiday_salary_yearly,
       total_m = total_salary_monthly,
-      total_y = total_salary_yearly,
-      total_deducted_m = total_salary_holidays_deducted_monthly,
-      total_deducted_y = total_salary_holidays_deducted_yearly
+      total_y = total_salary_yearly
     ) %>%
     as.data.frame(stringsAsFactors = FALSE)
 
@@ -263,10 +285,10 @@ make_salary_env_objects <- function(salaries_tbl) {
       own_pension_m = row$own_pension_amount_monthly,
       holiday_base_m = row$holiday_allowance_total_monthly,
       holiday_m = row$holiday_allowance_monthly,
+      total_plus_holiday_m = row$total_plus_holiday_salary_monthly,
+      total_plus_holiday_y = row$total_plus_holiday_salary_yearly,
       total_m = row$total_salary_monthly,
       total_y = row$total_salary_yearly,
-      total_deducted_m = row$total_salary_holidays_deducted_monthly,
-      total_deducted_y = row$total_salary_holidays_deducted_yearly,
       stringsAsFactors = FALSE
     )
     rownames(salary_obj) <- identifier
@@ -429,20 +451,20 @@ make_empty_template_registry <- function() {
 
 make_default_templates <- function() {
   tibble(
-    id = 1L:2L,
-    name = c("Custom", "Research Year"),
-    category = c("", "Salary for research year (RY)"),
-    center = rep("", 2),
-    mode = c("function", "function"),
-    unit = c("month", "year"),
-    constant_expr = rep("0", 2),
-    function_expr = c("rep(0, n)", "research_year$total_y"),
-    fte = c(NA_real_, 1),
-    note = c("", ""),
-    values = list(numeric(), numeric()),
-    duration_years = c(NA_real_, 3),
-    is_default = rep(TRUE, 2),
-    is_deleted = rep(FALSE, 2)
+    id = 1L:3L,
+    name = c("Custom", "Research Year", "PhD student"),
+    category = c("", "Salary for research year (RY)", "Salary Ph.D. students"),
+    center = rep("", 3),
+    mode = c("function", "function", "function"),
+    unit = c("month", "year", "month"),
+    constant_expr = rep("0", 3),
+    function_expr = c("rep(0, n)", "research_year$total_y", "apply_inflation_month(phd_student$total_m)"),
+    fte = c(NA_real_, 1, 1),
+    note = c("", "", ""),
+    values = list(numeric(), numeric(), numeric()),
+    duration_years = c(NA_real_, 3, NA_real_),
+    is_default = rep(TRUE, 3),
+    is_deleted = rep(FALSE, 3)
   )
 }
 
@@ -485,7 +507,7 @@ get_post_amendment_fields <- function(post_row, budget_start, budget_end, catego
   unique(fields)
 }
 
-resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflation_pct = 0, fte_monthly_total = NULL, salaries_tbl = NULL) {
+resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflation_pct = 0, fte_monthly_total = NULL, salaries_tbl = NULL, budget_start = NULL) {
   months <- month_sequence(post_row$start_date, post_row$end_date)
   n_months <- length(months)
   n_years <- ceiling(n_months / 12)
@@ -495,9 +517,12 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
   fte <- post_row$fte
   inflation_rate <- as.numeric(inflation_pct) / 100
   if (is.na(inflation_rate)) inflation_rate <- 0
-  base_calendar_year <- year(months[1])
+  # Use budget start year as the reference year (multiplier 1.0) so that posts
+  # starting later than the budget start already carry accumulated inflation.
+  base_calendar_year <- if (!is.null(budget_start)) year(as.Date(budget_start)) else year(months[1])
+  post_start_year_offset <- year(months[1]) - base_calendar_year
   inflation_month_factors <- (1 + inflation_rate)^(year(months) - base_calendar_year)
-  inflation_year_factors <- (1 + inflation_rate)^(seq_len(n_years) - 1)
+  inflation_year_factors <- (1 + inflation_rate)^(seq_len(n_years) - 1 + post_start_year_offset)
   if (is.null(fte_monthly_total)) {
     fte_monthly_total <- rep(NA_real_, n_months)
   } else {
@@ -628,7 +653,8 @@ build_long_budget <- function(posts_tbl, budget_start, budget_end, salaries_look
         salaries_lookup = salaries_lookup,
         inflation_pct = inflation_pct,
         fte_monthly_total = row_fte_monthly_total,
-        salaries_tbl = salaries_tbl
+        salaries_tbl = salaries_tbl,
+        budget_start = budget_start
       ),
       error = function(e) NULL
     )
@@ -654,7 +680,7 @@ build_long_budget <- function(posts_tbl, budget_start, budget_end, salaries_look
   })
 }
 
-post_total <- function(post_row, all_posts_tbl = post_row, salaries_lookup = data.frame(), inflation_pct = 0, salaries_tbl = NULL) {
+post_total <- function(post_row, all_posts_tbl = post_row, salaries_lookup = data.frame(), inflation_pct = 0, salaries_tbl = NULL, budget_start = NULL) {
   row_months <- month_sequence(post_row$start_date, post_row$end_date)
   row_fte_monthly_total <- map_dbl(row_months, function(m) {
     sum(all_posts_tbl$fte[all_posts_tbl$start_date <= m & all_posts_tbl$end_date >= m], na.rm = TRUE) / 12
@@ -665,7 +691,8 @@ post_total <- function(post_row, all_posts_tbl = post_row, salaries_lookup = dat
     salaries_lookup = salaries_lookup,
     inflation_pct = inflation_pct,
     fte_monthly_total = row_fte_monthly_total,
-    salaries_tbl = salaries_tbl
+    salaries_tbl = salaries_tbl,
+    budget_start = budget_start
   )
   sum(resolved$value)
 }
@@ -888,18 +915,17 @@ parse_salaries <- function(salaries_tbl) {
     return(make_empty_salaries())
   }
 
-  required <- c(
-    "id", "identifier", "name", "unit", "base_salary", "pension_mode", "pension_value",
-    "own_pension_pct", "base_salary_monthly", "pension_amount_monthly", "own_pension_amount_monthly", "holiday_allowance_total_monthly",
-    "holiday_allowance_monthly", "total_salary_monthly", "total_salary_holidays_deducted_monthly",
-    "base_salary_yearly", "pension_amount_yearly", "own_pension_amount_yearly", "holiday_allowance_total_yearly",
-    "holiday_allowance_yearly", "total_salary_yearly", "total_salary_holidays_deducted_yearly"
-  )
-  if (!all(required %in% names(salaries_tbl))) {
+  required_inputs <- c("id", "identifier", "name", "unit", "base_salary", "pension_mode", "pension_value", "own_pension_pct")
+  if (!all(required_inputs %in% names(salaries_tbl))) {
     return(make_empty_salaries())
   }
 
-  salaries_tbl %>%
+  # Backward compat: add new input fields if missing
+  if (!"wage_supplement" %in% names(salaries_tbl)) salaries_tbl$wage_supplement <- 0
+  if (!"holiday_rate" %in% names(salaries_tbl)) salaries_tbl$holiday_rate <- 12.5
+  if (!"subtract_holiday" %in% names(salaries_tbl)) salaries_tbl$subtract_holiday <- TRUE
+
+  salaries_tbl <- salaries_tbl %>%
     mutate(
       id = as.integer(id),
       identifier = as.character(identifier),
@@ -909,21 +935,44 @@ parse_salaries <- function(salaries_tbl) {
       base_salary = as.numeric(base_salary),
       pension_value = as.numeric(pension_value),
       own_pension_pct = as.numeric(own_pension_pct),
-      base_salary_monthly = as.numeric(base_salary_monthly),
-      pension_amount_monthly = as.numeric(pension_amount_monthly),
-      own_pension_amount_monthly = as.numeric(own_pension_amount_monthly),
-      holiday_allowance_total_monthly = as.numeric(holiday_allowance_total_monthly),
-      holiday_allowance_monthly = as.numeric(holiday_allowance_monthly),
-      total_salary_monthly = as.numeric(total_salary_monthly),
-      total_salary_holidays_deducted_monthly = as.numeric(total_salary_holidays_deducted_monthly),
-      base_salary_yearly = as.numeric(base_salary_yearly),
-      pension_amount_yearly = as.numeric(pension_amount_yearly),
-      own_pension_amount_yearly = as.numeric(own_pension_amount_yearly),
-      holiday_allowance_total_yearly = as.numeric(holiday_allowance_total_yearly),
-      holiday_allowance_yearly = as.numeric(holiday_allowance_yearly),
-      total_salary_yearly = as.numeric(total_salary_yearly),
-      total_salary_holidays_deducted_yearly = as.numeric(total_salary_holidays_deducted_yearly)
+      wage_supplement = as.numeric(wage_supplement),
+      holiday_rate = as.numeric(holiday_rate),
+      subtract_holiday = as.logical(subtract_holiday)
     )
+
+  # Recalculate all derived fields from input params
+  map_dfr(seq_len(nrow(salaries_tbl)), function(i) {
+    row <- salaries_tbl[i, ]
+    calc <- tryCatch(
+      calc_salary_fields(row$base_salary, row$unit, row$pension_mode, row$pension_value,
+                         row$own_pension_pct, row$wage_supplement, row$holiday_rate, row$subtract_holiday),
+      error = function(e) NULL
+    )
+    na_num <- NA_real_
+    tibble(
+      id = row$id, identifier = row$identifier, name = row$name, unit = row$unit,
+      base_salary = row$base_salary, pension_mode = row$pension_mode,
+      pension_value = row$pension_value, own_pension_pct = row$own_pension_pct,
+      wage_supplement = row$wage_supplement, holiday_rate = row$holiday_rate,
+      subtract_holiday = row$subtract_holiday,
+      base_salary_monthly               = if (is.null(calc)) na_num else calc$base_salary_monthly,
+      wage_supplement_monthly           = if (is.null(calc)) na_num else calc$wage_supplement_monthly,
+      pension_amount_monthly            = if (is.null(calc)) na_num else calc$pension_amount_monthly,
+      own_pension_amount_monthly        = if (is.null(calc)) na_num else calc$own_pension_amount_monthly,
+      holiday_allowance_total_monthly   = if (is.null(calc)) na_num else calc$holiday_allowance_total_monthly,
+      holiday_allowance_monthly         = if (is.null(calc)) na_num else calc$holiday_allowance_monthly,
+      total_plus_holiday_salary_monthly = if (is.null(calc)) na_num else calc$total_plus_holiday_salary_monthly,
+      total_salary_monthly              = if (is.null(calc)) na_num else calc$total_salary_monthly,
+      base_salary_yearly                = if (is.null(calc)) na_num else calc$base_salary_yearly,
+      wage_supplement_yearly            = if (is.null(calc)) na_num else calc$wage_supplement_yearly,
+      pension_amount_yearly             = if (is.null(calc)) na_num else calc$pension_amount_yearly,
+      own_pension_amount_yearly         = if (is.null(calc)) na_num else calc$own_pension_amount_yearly,
+      holiday_allowance_total_yearly    = if (is.null(calc)) na_num else calc$holiday_allowance_total_yearly,
+      holiday_allowance_yearly          = if (is.null(calc)) na_num else calc$holiday_allowance_yearly,
+      total_plus_holiday_salary_yearly  = if (is.null(calc)) na_num else calc$total_plus_holiday_salary_yearly,
+      total_salary_yearly               = if (is.null(calc)) na_num else calc$total_salary_yearly
+    )
+  })
 }
 
 append_total_row <- function(df, amount_col = "amount") {
@@ -1445,13 +1494,22 @@ ui <- fluidPage(
           fluidRow(
             column(3, numericInput("salary_pension_value", "Pension (% or amount)", value = 19.36, min = 0, step = 0.1)),
             column(3, numericInput("salary_own_pension_pct", "Own part of pension (%)", value = 33.3, min = 0, step = 0.1)),
-            column(3, textOutput("salary_holiday_base")),
-            column(3, textOutput("salary_holiday_allowance"))
+            column(3, numericInput("salary_wage_supplement", "Wage supplements (no pension)", value = 0, min = 0, step = 100)),
+            column(3, tags$div())
           ),
           fluidRow(
-            column(3, textOutput("salary_total")),
-            column(3, textOutput("salary_total_deducted")),
-            column(6, uiOutput("salary_error"))
+            column(3, numericInput("salary_holiday_rate", "Holiday allowance rate (%)", value = 12.5, min = 0, step = 0.1)),
+            column(3, tags$div(style = "margin-top: 25px;", checkboxInput("salary_subtract_holiday", "Subtract holiday from total", value = TRUE))),
+            column(6, tags$div())
+          ),
+          fluidRow(
+            column(3, textOutput("salary_holiday_base")),
+            column(3, textOutput("salary_holiday_allowance")),
+            column(3, textOutput("salary_total_plus_holiday")),
+            column(3, textOutput("salary_total"))
+          ),
+          fluidRow(
+            column(12, uiOutput("salary_error"))
           ),
           fluidRow(
             column(12, actionButton("salary_add_or_update", "Add / Update salary", class = "btn-success", style = "width: 100%; padding: 12px 0; margin: 12px 0;"))
@@ -1796,7 +1854,10 @@ server <- function(input, output, session) {
         unit = input$salary_unit,
         pension_mode = input$salary_pension_mode,
         pension_value = input$salary_pension_value,
-        own_pension_pct = input$salary_own_pension_pct
+        own_pension_pct = input$salary_own_pension_pct,
+        wage_supplement = input$salary_wage_supplement,
+        holiday_rate_pct = input$salary_holiday_rate,
+        subtract_holiday = isTRUE(input$salary_subtract_holiday)
       ),
       error = function(e) NULL
     )
@@ -1804,11 +1865,11 @@ server <- function(input, output, session) {
 
   output$salary_holiday_base <- renderText({
     calc <- salary_calc_preview()
-    if (is.null(calc)) return("Holiday allowance total: -")
+    if (is.null(calc)) return("Holiday base: -")
     unit <- input$salary_unit
     val <- if (identical(unit, "year")) calc$holiday_allowance_total_yearly else calc$holiday_allowance_total_monthly
     suffix <- if (identical(unit, "year")) " (yearly)" else " (monthly)"
-    paste0("Holiday allowance total", suffix, ": ", format(round(val, 2), nsmall = 2))
+    paste0("Holiday base", suffix, ": ", format(round(val, 2), nsmall = 2))
   })
 
   output$salary_holiday_allowance <- renderText({
@@ -1820,6 +1881,15 @@ server <- function(input, output, session) {
     paste0("Holiday allowance", suffix, ": ", format(round(val, 2), nsmall = 2))
   })
 
+  output$salary_total_plus_holiday <- renderText({
+    calc <- salary_calc_preview()
+    if (is.null(calc)) return("Total incl. holiday: -")
+    unit <- input$salary_unit
+    val <- if (identical(unit, "year")) calc$total_plus_holiday_salary_yearly else calc$total_plus_holiday_salary_monthly
+    suffix <- if (identical(unit, "year")) " (yearly)" else " (monthly)"
+    paste0("Total incl. holiday", suffix, ": ", format(round(val, 2), nsmall = 2))
+  })
+
   output$salary_total <- renderText({
     calc <- salary_calc_preview()
     if (is.null(calc)) return("Total salary: -")
@@ -1827,15 +1897,6 @@ server <- function(input, output, session) {
     val <- if (identical(unit, "year")) calc$total_salary_yearly else calc$total_salary_monthly
     suffix <- if (identical(unit, "year")) " (yearly)" else " (monthly)"
     paste0("Total salary", suffix, ": ", format(round(val, 2), nsmall = 2))
-  })
-
-  output$salary_total_deducted <- renderText({
-    calc <- salary_calc_preview()
-    if (is.null(calc)) return("Total salary, holidays deducted: -")
-    unit <- input$salary_unit
-    val <- if (identical(unit, "year")) calc$total_salary_holidays_deducted_yearly else calc$total_salary_holidays_deducted_monthly
-    suffix <- if (identical(unit, "year")) " (yearly)" else " (monthly)"
-    paste0("Total salary, holidays deducted", suffix, ": ", format(round(val, 2), nsmall = 2))
   })
 
   output$salary_table <- renderDT({
@@ -1848,18 +1909,18 @@ server <- function(input, output, session) {
           own_pension_amount_monthly,
           holiday_allowance_total_monthly,
           holiday_allowance_monthly,
-          total_salary_monthly, total_salary_yearly,
-          total_salary_holidays_deducted_monthly, total_salary_holidays_deducted_yearly
+          total_plus_holiday_salary_monthly, total_plus_holiday_salary_yearly,
+          total_salary_monthly, total_salary_yearly
         ),
       colnames = c(
         "ID", "Name",
-        "Base (base)",
-        "Pension (pension)",
-        "Own pens (own_pension)",
-        "Hol base (holiday_base)",
-        "Holiday (holiday)",
-        "Total (total_m)", "Total (total_y)",
-        "Total % holiday (total_deducted_m)", "Total % holiday (total_deducted_y)"
+        "Base (base_m)",
+        "Pension (pension_m)",
+        "Own pens (own_pension_m)",
+        "Hol base (holiday_base_m)",
+        "Holiday (holiday_m)",
+        "Total+hol (total_plus_holiday_m)", "Total+hol (total_plus_holiday_y)",
+        "Total (total_m)", "Total (total_y)"
       ),
       selection = "single",
       rownames = FALSE,
@@ -1872,8 +1933,8 @@ server <- function(input, output, session) {
           "own_pension_amount_monthly",
           "holiday_allowance_total_monthly",
           "holiday_allowance_monthly",
-          "total_salary_monthly", "total_salary_yearly",
-          "total_salary_holidays_deducted_monthly", "total_salary_holidays_deducted_yearly"
+          "total_plus_holiday_salary_monthly", "total_plus_holiday_salary_yearly",
+          "total_salary_monthly", "total_salary_yearly"
         ),
         digits = 2
       )
@@ -1935,20 +1996,25 @@ server <- function(input, output, session) {
       pension_mode = input$salary_pension_mode,
       pension_value = as.numeric(input$salary_pension_value),
       own_pension_pct = as.numeric(input$salary_own_pension_pct),
+      wage_supplement = as.numeric(input$salary_wage_supplement),
+      holiday_rate = as.numeric(input$salary_holiday_rate),
+      subtract_holiday = isTRUE(input$salary_subtract_holiday),
       base_salary_monthly = calc$base_salary_monthly,
+      wage_supplement_monthly = calc$wage_supplement_monthly,
       pension_amount_monthly = calc$pension_amount_monthly,
       own_pension_amount_monthly = calc$own_pension_amount_monthly,
       holiday_allowance_total_monthly = calc$holiday_allowance_total_monthly,
       holiday_allowance_monthly = calc$holiday_allowance_monthly,
+      total_plus_holiday_salary_monthly = calc$total_plus_holiday_salary_monthly,
       total_salary_monthly = calc$total_salary_monthly,
-      total_salary_holidays_deducted_monthly = calc$total_salary_holidays_deducted_monthly,
       base_salary_yearly = calc$base_salary_yearly,
+      wage_supplement_yearly = calc$wage_supplement_yearly,
       pension_amount_yearly = calc$pension_amount_yearly,
       own_pension_amount_yearly = calc$own_pension_amount_yearly,
       holiday_allowance_total_yearly = calc$holiday_allowance_total_yearly,
       holiday_allowance_yearly = calc$holiday_allowance_yearly,
-      total_salary_yearly = calc$total_salary_yearly,
-      total_salary_holidays_deducted_yearly = calc$total_salary_holidays_deducted_yearly
+      total_plus_holiday_salary_yearly = calc$total_plus_holiday_salary_yearly,
+      total_salary_yearly = calc$total_salary_yearly
     )
 
     if (is_new) {
@@ -1975,6 +2041,9 @@ server <- function(input, output, session) {
     updateSelectInput(session, "salary_pension_mode", selected = row$pension_mode)
     updateNumericInput(session, "salary_pension_value", value = row$pension_value)
     updateNumericInput(session, "salary_own_pension_pct", value = row$own_pension_pct)
+    updateNumericInput(session, "salary_wage_supplement", value = row$wage_supplement)
+    updateNumericInput(session, "salary_holiday_rate", value = row$holiday_rate)
+    updateCheckboxInput(session, "salary_subtract_holiday", value = isTRUE(row$subtract_holiday))
     set_success("Salary calculation loaded for editing.")
   })
 
@@ -2551,7 +2620,7 @@ server <- function(input, output, session) {
 
     map_dfr(seq_len(nrow(rv$posts)), function(i) {
       row <- rv$posts[i, ]
-      total <- tryCatch(post_total(row, all_posts_tbl = rv$posts, salaries_lookup = salaries_lookup, inflation_pct = input$inflation_pct, salaries_tbl = rv$salaries), error = function(e) NA_real_)
+      total <- tryCatch(post_total(row, all_posts_tbl = rv$posts, salaries_lookup = salaries_lookup, inflation_pct = input$inflation_pct, salaries_tbl = rv$salaries, budget_start = as.Date(input$budget_start)), error = function(e) NA_real_)
       tibble(
         id = row$id,
         center = row$center,
@@ -2858,7 +2927,7 @@ server <- function(input, output, session) {
     amount_col <- if ("Amount" %in% names(data_rows)) "Amount" else if ("Value" %in% names(data_rows)) "Value" else NULL
     if (is.null(amount_col)) stop("No amount column found in table data.")
 
-    periods_vec <- unique(data_rows$Period)
+    periods_vec <- sort(unique(data_rows$Period))
     sites_vec <- unique(data_rows$Site)
     posts_by_site <- lapply(sites_vec, function(site) {
       if (identical(column_mode, "category")) {
@@ -3325,7 +3394,8 @@ server <- function(input, output, session) {
         salaries_lookup = make_salary_lookup(rv$salaries),
         inflation_pct = input$inflation_pct,
         fte_monthly_total = row_fte_monthly_total,
-        salaries_tbl = rv$salaries
+        salaries_tbl = rv$salaries,
+        budget_start = as.Date(input$budget_start)
       )
       category_msg <- validate_category_rule(
         resolved_values = resolved_for_validation,
@@ -3652,7 +3722,7 @@ server <- function(input, output, session) {
         tags$li(tags$b("months"), " - month vector for current post date range"),
         tags$li(tags$b("FTE"), " - FTE per year as input by user"),
         tags$li(tags$b("FTE_monthly"), " - FTE of this post per month (FTE / 12)"),
-        tags$li(tags$b("FTE_all"), " - year vector (post-year buckets) of summed monthly FTE across all posts"),
+        tags$li(tags$b("FTE_all"), " - year vector (post-year buckets) of summed yearly FTE across all posts"),
         tags$li(tags$b("FTE_monthly_all"), " - vector of summed monthly FTE (yearly FTE / 12) across all posts for each month in the current post range"),
         tags$li(tags$b("FTE_total"), " - scalar sum of all period-wise FTEs across all posts (sum of FTE_monthly_all)"),
         tags$li(tags$b("inflation_pct"), " - yearly inflation percentage"),
@@ -3665,12 +3735,14 @@ server <- function(input, output, session) {
       tags$ul(
         tags$li("Each salary identifier is available as an object, e.g. phd_student$total_m"),
         tags$li("Identifiers are generated from salary names and made unique"),
-        tags$li("Monthly selectors: base_m, pension_m, own_pension_m, holiday_base_m, holiday_m, total_m, total_holidays_deducted_m"),
-        tags$li("Yearly selectors: base_y, pension_y, own_pension_y, holiday_base_y, holiday_y, total_y, total_holidays_deducted_y"),
+        tags$li("Monthly selectors: base_m, pension_m, own_pension_m, holiday_base_m, holiday_m, total_plus_holiday_m, total_m"),
+        tags$li("Yearly selectors: total_plus_holiday_y, total_y"),
+        tags$li(tags$b("total_m / total_y"), " — the final effective salary (holiday-absence deducted if 'Subtract holiday' is on)"),
+        tags$li(tags$b("total_plus_holiday_m / total_plus_holiday_y"), " — salary including holiday allowance but before holiday-absence deduction"),
         tags$li("Legacy lookup object salaries[identifier, \"total_m\"] remains available for older formulas")
       ),
       tags$p("Examples:"),
-      tags$pre("apply_inflation_month(phd_student$total_m)")
+      tags$pre("apply_inflation_month(phd_student$total_m)\nresearch_year$total_plus_holiday_m\nclinical_researcher$total_y")
     ))
   })
 
