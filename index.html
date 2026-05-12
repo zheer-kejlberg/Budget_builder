@@ -525,7 +525,7 @@ make_default_templates &lt;- function() {
     name = c("Custom", "Research Year"),
     category = c("", "Salary for research year (RY)"),
     center = rep("", 2),
-    mode = c("constant", "function"),
+    mode = c("function", "function"),
     unit = c("month", "year"),
     constant_expr = rep("0", 2),
     function_expr = c("rep(0, n)", "research_year$total_y"),
@@ -644,7 +644,8 @@ resolve_post_values &lt;- function(post_row, salaries_lookup = data.frame(), inf
     values &lt;- rep(as.numeric(scalar), if (unit == "month") n_months else n_years)
   } else if (mode == "function") {
     function_expr_safe &lt;- if (is.null(post_row$function_expr) || !nzchar(trimws(post_row$function_expr))) "rep(0, n)" else post_row$function_expr
-    values &lt;- safe_eval_expr(function_expr_safe, fte = fte, n = n_months, extra_env = extra_env)
+    n_values &lt;- if (unit == "year") n_years else n_months
+    values &lt;- safe_eval_expr(function_expr_safe, fte = fte, n = n_values, extra_env = extra_env)
     if (!is.numeric(values)) {
       stop("Amount formula must resolve to numeric values.", call. = FALSE)
     }
@@ -792,7 +793,7 @@ parse_posts &lt;- function(posts_tbl) {
         start_date = as.character(NA),
         end_date = as.character(NA),
         fte = NA_real_,
-        value_mode = "constant",
+        value_mode = "function",
         value_unit = "month",
         constant_expr = "0",
         function_expr = "rep(0, n)",
@@ -935,7 +936,7 @@ parse_templates &lt;- function(templates_tbl) {
         name = "",
         category = "",
         center = "",
-        mode = "constant",
+        mode = "function",
         unit = "month",
         constant_expr = "0",
         function_expr = "rep(0, n)",
@@ -1422,10 +1423,9 @@ ui &lt;- fluidPage(
     sidebarPanel(
       h4("Add or edit post"),
       selectInput("template_name", "Template", choices = make_default_templates()$name, selected = "Custom"),
-      actionButton("apply_template", "Apply template", style = "width: 100%; margin-bottom: 5px;"),
       tags$div(
         class = "row sidebar-split-row",
-        tags$div(class = "col-sm-6 sidebar-split-left", actionButton("edit_template_btn", "Edit template", style = "width: 100%;")),
+        tags$div(class = "col-sm-6 sidebar-split-left", actionButton("edit_template_btn", "Edit template", class = "btn-primary", style = "width: 100%;")),
         tags$div(class = "col-sm-6 sidebar-split-right", actionButton("save_as_template_btn", "Save template", class = "btn-success", style = "width: 100%;"))
       ),
       tags$hr(style = "margin: 8px 0;"),
@@ -1434,13 +1434,13 @@ ui &lt;- fluidPage(
       selectInput("category", required_label("Category"), choices = c("", make_default_categories()$name), selected = ""),
       dateRangeInput("post_date_range", required_label("Date range"), start = start_default, end = end_default, width = "100%"),
       numericInput("fte", "FTE", value = NA_real_, min = 0, step = 0.1),
-      selectInput("value_mode", "How should amount be defined?", choices = c("constant", "function", "variable"), selected = "constant"),
-      selectInput("value_unit", "Amount frequency", choices = c("month", "year"), selected = "month"),
+      selectInput("value_mode", "How should amount be defined?", choices = c("Formula" = "function", "Variable" = "variable"), selected = "function"),
+      radioButtons("value_unit", "Input amount per", choices = c("Month" = "month", "Year" = "year"), selected = "month", inline = TRUE),
       uiOutput("value_inputs_ui"),
       textAreaInput("note", "Note", value = "", rows = 2),
       tags$div(style = "font-size:0.8em;color:#b00020;margin-top:-4px;", "* = required"),
       fluidRow(
-        column(12, actionButton("add_or_update", "Add budget post", class = "btn-primary", style = "width: 100%;"))
+        column(12, actionButton("add_or_update", "Add budget post", class = "btn-success", style = "width: 100%;"))
       ),
       uiOutput("form_error"),
       uiOutput("success_feedback")
@@ -1493,7 +1493,8 @@ ui &lt;- fluidPage(
             column(6, textInput("filter_text", "Free-text search", value = "", placeholder = "Search in period, post name, site, category"))
           ),
           fluidRow(
-            column(4, actionButton("edit_selected", "Edit post", style = "width: 100%;")),
+            style = "padding: 15px 0;",
+            column(4, actionButton("edit_selected", "Edit post", class = "btn-primary", style = "width: 100%;")),
             column(4, actionButton("delete_selected", "Delete post", class = "btn-danger", style = "width: 100%;")),
             column(4, actionButton("make_inactive", "Make inactive", class = "btn-warning", style = "width: 100%;"))
           ),
@@ -1526,14 +1527,14 @@ ui &lt;- fluidPage(
             column(6, uiOutput("salary_error"))
           ),
           fluidRow(
-            column(12, actionButton("salary_add_or_update", "Add / Update salary", class = "btn-primary", style = "width: 100%; padding: 12px 0; margin: 12px 0;"))
+            column(12, actionButton("salary_add_or_update", "Add / Update salary", class = "btn-success", style = "width: 100%; padding: 12px 0; margin: 12px 0;"))
           ),
           tags$hr(),
           br(),
           DTOutput("salary_table"),
           br(),
           fluidRow(
-            column(6, actionButton("salary_edit_selected", "Edit selected salary", style = "width: 100%; padding: 10px 0;")),
+            column(6, actionButton("salary_edit_selected", "Edit selected salary", class = "btn-primary", style = "width: 100%; padding: 10px 0;")),
             column(6, actionButton("salary_delete_selected", "Delete selected salary", class = "btn-danger", style = "width: 100%; padding: 10px 0;"))
           ),
           br(),
@@ -1553,8 +1554,8 @@ ui &lt;- fluidPage(
                 column(6, tags$div())
               ),
               fluidRow(
-                column(4, actionButton("site_add", "Add", class = "btn-primary")),
-                column(4, actionButton("site_edit_selected", "Edit")),
+                column(4, actionButton("site_add", "Add", class = "btn-success")),
+                column(4, actionButton("site_edit_selected", "Edit", class = "btn-primary")),
                 column(4, tags$div())
               ),
               fluidRow(
@@ -1579,8 +1580,8 @@ ui &lt;- fluidPage(
               ),
               tags$div(style = "margin: 4px 0 10px; color: #555;", "Operators define the rule, Amount is the threshold, and Per says whether the threshold applies to each month, each calendar year, or each project year."),
               fluidRow(
-                column(4, actionButton("cat_add", "Add", class = "btn-primary")),
-                column(4, actionButton("cat_edit_selected", "Edit")),
+                column(4, actionButton("cat_add", "Add", class = "btn-success")),
+                column(4, actionButton("cat_edit_selected", "Edit", class = "btn-primary")),
                 column(4, tags$div())
               ),
               fluidRow(
@@ -1689,8 +1690,8 @@ server &lt;- function(input, output, session) {
     updateSelectInput(session, "category", selected = "")
     updateDateRangeInput(session, "post_date_range", start = input$budget_start, end = input$budget_end)
     updateNumericInput(session, "fte", value = NA_real_)
-    updateSelectInput(session, "value_mode", selected = "constant")
-    updateSelectInput(session, "value_unit", selected = "month")
+    updateSelectInput(session, "value_mode", selected = "function")
+    updateRadioButtons(session, "value_unit", selected = "month")
     updateTextInput(session, "constant_expr", value = "0")
     updateTextInput(session, "function_expr", value = "rep((510000*FTE)/12, n)")
     updateTextAreaInput(session, "note", value = "")
@@ -2436,7 +2437,7 @@ server &lt;- function(input, output, session) {
     rv$editing_template_id &lt;- NA_integer_
     updateTextInput(session, "tpl_name", value = "")
     updateSelectInput(session, "tpl_category", selected = "")
-    updateSelectInput(session, "tpl_mode", selected = "constant")
+    updateSelectInput(session, "tpl_mode", selected = "function")
     updateSelectInput(session, "tpl_unit", selected = "month")
     updateTextAreaInput(session, "tpl_note", value = "")
     set_success(if (is_new) paste("Template added:", nm) else paste("Template updated:", nm))
@@ -2472,7 +2473,7 @@ server &lt;- function(input, output, session) {
     set_success("Default templates restored.")
   })
 
-  observeEvent(input$apply_template, {
+  observeEvent(input$template_name, {
     tpl &lt;- rv$template_registry %&gt;% filter(!is_deleted, name == input$template_name) %&gt;% slice(1)
     req(nrow(tpl) == 1)
 
@@ -2481,8 +2482,9 @@ server &lt;- function(input, output, session) {
 
     updateSelectInput(session, "center", selected = tpl$center)
     updateSelectInput(session, "category", selected = tpl$category)
-    updateSelectInput(session, "value_mode", selected = tpl$mode)
-    updateSelectInput(session, "value_unit", selected = tpl$unit)
+    selected_mode &lt;- if (identical(tpl$mode, "variable")) "variable" else "function"
+    updateSelectInput(session, "value_mode", selected = selected_mode)
+    updateRadioButtons(session, "value_unit", selected = tpl$unit)
     updateTextInput(session, "constant_expr", value = tpl$constant_expr)
     updateTextInput(session, "function_expr", value = tpl$function_expr)
     updateNumericInput(session, "fte", value = tpl$fte)
@@ -2500,7 +2502,7 @@ server &lt;- function(input, output, session) {
     rv$value_inputs_refresh &lt;- rv$value_inputs_refresh + 1L
     refresh_post_field_labels()
     set_success(paste("Template applied:", input$template_name))
-  })
+  }, ignoreInit = TRUE)
 
   observeEvent(input$edit_template_btn, {
     tpl &lt;- rv$template_registry %&gt;% filter(!is_deleted, name == input$template_name) %&gt;% slice(1)
@@ -2512,8 +2514,9 @@ server &lt;- function(input, output, session) {
     updateTextInput(session, "post_name", value = tpl$name)
     updateSelectInput(session, "center", selected = tpl$center)
     updateSelectInput(session, "category", selected = tpl$category)
-    updateSelectInput(session, "value_mode", selected = tpl$mode)
-    updateSelectInput(session, "value_unit", selected = tpl$unit)
+    selected_mode &lt;- if (identical(tpl$mode, "variable")) "variable" else "function"
+    updateSelectInput(session, "value_mode", selected = selected_mode)
+    updateRadioButtons(session, "value_unit", selected = tpl$unit)
     updateNumericInput(session, "fte", value = tpl$fte)
     updateTextAreaInput(session, "note", value = tpl$note)
     if (!is.na(tpl$duration_years)) {
@@ -2565,7 +2568,7 @@ server &lt;- function(input, output, session) {
       name           = nm,
       category       = if (!is.null(input$category)) input$category else "",
       center         = if (!is.null(input$center)) input$center else "",
-      mode           = if (!is.null(input$value_mode)) input$value_mode else "constant",
+      mode           = if (!is.null(input$value_mode)) input$value_mode else "function",
       unit           = if (!is.null(input$value_unit)) input$value_unit else "month",
       constant_expr  = rv$constant_expr_draft,
       function_expr  = rv$function_expr_draft,
@@ -2601,13 +2604,9 @@ server &lt;- function(input, output, session) {
     mode &lt;- input$value_mode
     rv$value_inputs_refresh  # reactive dependency for programmatic refresh
 
-    if (mode == "constant") {
+    if (mode == "function") {
       tagList(
-        textInput("constant_expr", "Constant amount expression", value = isolate(rv$constant_expr_draft), placeholder = "Example: 510000*FTE")
-      )
-    } else if (mode == "function") {
-      tagList(
-        textInput("function_expr", "Amount formula expression", value = isolate(rv$function_expr_draft), placeholder = "Expression using n, FTE, fte_monthly_total/fte_yearly_total, salary_identifier$total_m and inflation helpers"),
+        textInput("function_expr", "Formula expression", value = isolate(rv$function_expr_draft), placeholder = "Expression using n, FTE, fte_monthly_total/fte_yearly_total, salary_identifier$total_m and inflation helpers"),
         actionButton("show_formula_help", "Help: available formula variables")
       )
     } else {
@@ -3252,8 +3251,9 @@ server &lt;- function(input, output, session) {
     updateSelectInput(session, "category", selected = row$category)
     updateDateRangeInput(session, "post_date_range", start = row$start_date, end = row$end_date)
     updateNumericInput(session, "fte", value = row$fte)
-    updateSelectInput(session, "value_mode", selected = row$value_mode)
-    updateSelectInput(session, "value_unit", selected = row$value_unit)
+    selected_mode &lt;- if (identical(row$value_mode, "variable")) "variable" else "function"
+    updateSelectInput(session, "value_mode", selected = selected_mode)
+    updateRadioButtons(session, "value_unit", selected = row$value_unit)
     updateTextInput(session, "constant_expr", value = row$constant_expr)
     updateTextInput(session, "function_expr", value = row$function_expr)
     updateTextAreaInput(session, "note", value = row$note)
@@ -3451,7 +3451,7 @@ server &lt;- function(input, output, session) {
         easyClose = FALSE,
         footer = tagList(
           modalButton("Return"),
-          actionButton("confirm_override_category_rule", "Override and Save", class = "btn-warning")
+          actionButton("confirm_override_category_rule", "Override and Save", class = "btn-success")
         )
       ))
       return()
@@ -3733,10 +3733,11 @@ server &lt;- function(input, output, session) {
       title = "Formula variables and helpers",
       easyClose = TRUE,
       footer = modalButton("Close"),
-      tags$p("Available in amount formulas (function mode):"),
+      tags$p(tags$b("Note:"), " entering a single value repeats that value for every period."),
+      tags$p("Available in amount formulas (Formula mode):"),
       tags$ul(
         tags$li(tags$b("FTE"), " - current post FTE"),
-        tags$li(tags$b("n"), " - required vector length (months)"),
+        tags$li(tags$b("n"), " - required vector length for the selected input period (months or years)"),
         tags$li(tags$b("months"), " - month vector for current post date range"),
         tags$li(tags$b("fte_monthly_total"), " - vector of summed FTE across all posts for each month in the current post range"),
         tags$li(tags$b("fte_monthly_sum"), " - scalar sum of fte_monthly_total"),
