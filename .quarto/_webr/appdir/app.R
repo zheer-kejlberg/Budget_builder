@@ -1342,7 +1342,7 @@ ui <- fluidPage(
           onInitialize = I('function() { this.clear(); }')
         )
       ),
-      actionButton("save_as_template_btn", "Save template", class = "btn-success", style = "width: 100%;"),
+      actionButton("save_as_template_btn", "Save template", class = "btn-success", style = "margin: 0 max(30px, calc(50% - 100px));width: min(calc(100% - 60px), 200px);max-width: min(calc(100% - 60px), 200px);"),
       tags$hr(style = "margin: 8px 0;"),
       textInput("post_name", required_label("Post name")),
       selectInput("center", required_label("Site"), choices = c("", make_default_sites()$name), selected = ""),
@@ -2060,15 +2060,15 @@ server <- function(input, output, session) {
   # Keep site/category/template selectors synchronized with registries
   observe({
     active_sites <- rv$site_registry %>% filter(!is_deleted) %>% pull(name)
-    current_site <- if (!is.null(input$center)) trimws(input$center) else ""
+    current_site <- isolate(if (!is.null(input$center)) trimws(input$center) else "")
     selected_site <- if (nzchar(current_site) && current_site %in% active_sites) current_site else ""
     updateSelectInput(session, "center", choices = c("", active_sites), selected = selected_site)
   })
 
   observe({
     active_categories <- rv$category_registry %>% filter(!is_deleted) %>% pull(name)
-    updateSelectInput(session, "category", choices = c("", active_categories), selected = input$category)
-    updateSelectInput(session, "tpl_category", choices = c("", active_categories), selected = input$tpl_category)
+    updateSelectInput(session, "category", choices = c("", active_categories), selected = isolate(input$category))
+    updateSelectInput(session, "tpl_category", choices = c("", active_categories), selected = isolate(input$tpl_category))
   })
 
   observeEvent(rv$template_registry, {
@@ -2571,10 +2571,15 @@ server <- function(input, output, session) {
     }
   })
 
-  output$value_inputs_ui <- renderUI({
-    mode <- input$value_mode
-    rv$value_inputs_refresh  # reactive dependency for programmatic refresh
+  # Increment value_inputs_ui refresh counter when user changes mode/unit/dates directly
+  observeEvent(input$value_mode,       { rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L }, ignoreInit = TRUE)
+  observeEvent(input$value_unit,       { rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L }, ignoreInit = TRUE)
+  observeEvent(input$post_date_range,  { rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L }, ignoreInit = TRUE)
 
+  output$value_inputs_ui <- renderUI({
+    rv$value_inputs_refresh  # single reactive dependency
+
+    mode <- isolate(input$value_mode)
     if (is.null(mode) || !nzchar(mode)) {
       return(NULL)
     }
@@ -2585,8 +2590,8 @@ server <- function(input, output, session) {
         actionButton("show_formula_help", "Help: available formula variables")
       )
     } else {
-      n_vals <- required_value_count()
-      defaults <- rv$variable_defaults
+      n_vals <- isolate(required_value_count())
+      defaults <- isolate(rv$variable_defaults)
       if (length(defaults) < n_vals) defaults <- c(defaults, rep(0, n_vals - length(defaults)))
 
       tagList(
