@@ -964,7 +964,7 @@ ui <- fluidPage(
     "
     #header-row input, #header-row .btn {
       height:38px;
-      margin:0;
+      margin:0 0 5px 0;
     },
     input.form-control, div.selectize-input, container-fluid {
       font-size: 12px !important;
@@ -1056,6 +1056,9 @@ ui <- fluidPage(
     }
     table.dataTable td, table.dataTable th {
       font-size: 12px !important;
+    }
+    table.dataTable tbody td.wide-col-selected {
+      background-color: rgba(176, 190, 217, 0.55) !important;
     }
 
     h4 {
@@ -2728,7 +2731,7 @@ server <- function(input, output, session) {
     }
   })
 
-  build_wide_from_long <- function(long_df) {
+  build_wide_from_long <- function(long_df, include_site_totals = TRUE) {
     if (!nrow(long_df)) {
       return(list(
         data = tibble(Period = character()),
@@ -2789,13 +2792,16 @@ server <- function(input, output, session) {
         }
       }
 
-      total_col <- paste(site, "Site total", sep = " > ")
-      post_mat <- as.matrix(wide_df[, post_cols, drop = FALSE])
-      post_counts <- rowSums(!is.na(post_mat))
-      post_sums <- rowSums(post_mat, na.rm = TRUE)
-      wide_df[[total_col]] <- ifelse(post_counts == 0, NA_real_, post_sums)
+      numeric_cols <- c(numeric_cols, post_cols)
 
-      numeric_cols <- c(numeric_cols, post_cols, total_col)
+      if (isTRUE(include_site_totals)) {
+        total_col <- paste(site, "Site total", sep = " > ")
+        post_mat <- as.matrix(wide_df[, post_cols, drop = FALSE])
+        post_counts <- rowSums(!is.na(post_mat))
+        post_sums <- rowSums(post_mat, na.rm = TRUE)
+        wide_df[[total_col]] <- ifelse(post_counts == 0, NA_real_, post_sums)
+        numeric_cols <- c(numeric_cols, total_col)
+      }
 
       if (s_idx < length(sites_vec)) {
         spacer_col <- strrep(" ", s_idx)
@@ -2804,7 +2810,11 @@ server <- function(input, output, session) {
       }
     }
 
-    site_total_cols <- grep(" > Site total$", names(wide_df), value = TRUE)
+    if (isTRUE(include_site_totals)) {
+      grand_source_cols <- grep(" > Site total$", names(wide_df), value = TRUE)
+    } else {
+      grand_source_cols <- setdiff(numeric_cols, "All sites > Total")
+    }
     grand_spacer <- strrep(" ", length(sites_vec) + 1)
     while (grand_spacer %in% names(wide_df)) {
       grand_spacer <- paste0(grand_spacer, " ")
@@ -2813,8 +2823,8 @@ server <- function(input, output, session) {
     spacer_cols <- c(spacer_cols, grand_spacer)
 
     grand_total_col <- "All sites > Total"
-    if (length(site_total_cols) > 0) {
-      wide_df[[grand_total_col]] <- rowSums(as.matrix(wide_df[, site_total_cols, drop = FALSE]), na.rm = TRUE)
+    if (length(grand_source_cols) > 0) {
+      wide_df[[grand_total_col]] <- rowSums(as.matrix(wide_df[, grand_source_cols, drop = FALSE]), na.rm = TRUE)
     } else {
       wide_df[[grand_total_col]] <- NA_real_
     }
@@ -2856,7 +2866,11 @@ server <- function(input, output, session) {
       )
     }
 
-    wide_obj <- build_wide_from_long(long_data)
+    squash <- input$squash_dims
+    if (is.null(squash)) squash <- character(0)
+    include_site_totals <- !any(c("Site", "Post name") %in% squash)
+
+    wide_obj <- build_wide_from_long(long_data, include_site_totals = include_site_totals)
     wide_df <- wide_obj$data
     numeric_cols <- wide_obj$numeric_cols
     flagged_post_cols <- wide_obj$flagged_post_cols
@@ -2869,7 +2883,7 @@ server <- function(input, output, session) {
       tags$th(rowspan = 2, "Period"),
       lapply(seq_len(nrow(site_counts)), function(i) {
         tagList(
-          tags$th(colspan = site_counts$n_posts[i] + 1, site_counts$Site[i], style = "text-align:center;"),
+          tags$th(colspan = site_counts$n_posts[i] + ifelse(include_site_totals, 1, 0), site_counts$Site[i], style = "text-align:center;"),
           if (i < nrow(site_counts)) tags$th(rowspan = 2, "", style = "min-width:16px;width:16px;border:none;background:#fff;")
         )
       }),
@@ -2880,10 +2894,11 @@ server <- function(input, output, session) {
       unlist(lapply(seq_len(nrow(site_counts)), function(i) {
         site <- site_counts$Site[i]
         posts <- wide_obj$posts_by_site[[site]]
-        c(
-          lapply(posts, function(p) tags$th(p)),
-          list(tags$th("Site total", style = "font-weight:700;"))
-        )
+        cells <- lapply(posts, function(p) tags$th(p))
+        if (isTRUE(include_site_totals)) {
+          cells <- c(cells, list(tags$th("Site total", style = "font-weight:700;")))
+        }
+        cells
       })
       , recursive = FALSE),
       tags$th("Total", style = "font-weight:700;")
@@ -2894,7 +2909,7 @@ server <- function(input, output, session) {
       wide_df,
       rownames = FALSE,
       container = table_header,
-      selection = list(mode = "single", target = "cell"),
+      selection = "none",
       options = list(
         pageLength = 25,
         lengthMenu = list(c(25, 50, 100, -1), c("25", "50", "100", "All")),
@@ -2902,6 +2917,41 @@ server <- function(input, output, session) {
         searching = FALSE,
         ordering = FALSE,
         scrollX = TRUE,
+        initComplete = JS(
+          "function() {",
+          "  var api = this.api();",
+          "  var tableNode = api.table().node();",
+          "  var $table = $(tableNode);",
+          "  Shiny.setInputValue('wide_col_selected', -1, {priority: 'event'});",
+          "  $table.on('click', 'tbody td', function() {",
+          "    var idx = api.cell(this).index();",
+          "    if (!idx) return;",
+          "    var col = idx.column;",
+          "    var prev = tableNode.dataset.selectedCol;",
+          "    if (prev !== undefined && prev !== '' && parseInt(prev, 10) === col) {",
+          "      delete tableNode.dataset.selectedCol;",
+          "      $(api.cells().nodes()).removeClass('wide-col-selected');",
+          "      Shiny.setInputValue('wide_col_selected', -1, {priority: 'event'});",
+          "      return;",
+          "    }",
+          "    tableNode.dataset.selectedCol = col;",
+          "    $(api.cells().nodes()).removeClass('wide-col-selected');",
+          "    $(api.cells(null, col).nodes()).addClass('wide-col-selected');",
+          "    Shiny.setInputValue('wide_col_selected', col + 1, {priority: 'event'});",
+          "  });",
+          "}"
+        ),
+        drawCallback = JS(
+          "function() {",
+          "  var api = this.api();",
+          "  var tableNode = api.table().node();",
+          "  var col = tableNode.dataset.selectedCol;",
+          "  $(api.cells().nodes()).removeClass('wide-col-selected');",
+          "  if (col !== undefined && col !== '') {",
+          "    $(api.cells(null, parseInt(col, 10)).nodes()).addClass('wide-col-selected');",
+          "  }",
+          "}"
+        ),
         rowCallback = JS(
           "function(row, data) {",
           "  if (data[0] === 'TOTAL') {",
@@ -2928,24 +2978,18 @@ server <- function(input, output, session) {
 
   selected_post_id <- reactive({
     if (identical(input$display_form, "wide")) {
-      sel <- input$wide_form_table_cells_selected
+      col_guard <- input$wide_col_selected
+      if (is.null(col_guard) || is.na(col_guard) || as.integer(col_guard) < 1L) return(NA_integer_)
+
       long_tbl <- filtered_posts()
-      if (is.null(sel) || !length(sel) || !nrow(long_tbl)) return(NA_integer_)
+      if (!nrow(long_tbl)) return(NA_integer_)
+      col_idx <- as.integer(col_guard)
 
-      col_idx <- NA_integer_
-      if (is.matrix(sel) || is.data.frame(sel)) {
-        if (!is.null(colnames(sel)) && "col" %in% colnames(sel)) {
-          col_idx <- as.integer(sel[1, "col"])
-        } else if (ncol(sel) >= 2) {
-          col_idx <- as.integer(sel[1, 2])
-        }
-      }
-      if (is.na(col_idx)) return(NA_integer_)
+      squash <- input$squash_dims
+      if (is.null(squash)) squash <- character(0)
+      include_site_totals <- !any(c("Site", "Post name") %in% squash)
 
-      # DT cell selection reports zero-based column indices; convert to R's one-based indexing.
-      col_idx <- col_idx + 1L
-
-      wide_obj <- build_wide_from_long(long_tbl)
+      wide_obj <- build_wide_from_long(long_tbl, include_site_totals = include_site_totals)
       wide_cols <- names(wide_obj$data)
       if (col_idx < 1 || col_idx > length(wide_cols)) return(NA_integer_)
 
@@ -2986,7 +3030,11 @@ server <- function(input, output, session) {
     sid <- selected_post_id()
     if (is.na(sid)) {
       if (identical(input$display_form, "wide")) {
-        rv$form_error_text <- "Select a specific post column in Wide view to edit. Site/grand total columns are not editable."
+        rv$form_error_text <- NULL
+        rv$form_error_at <- NULL
+        later::later(function() {
+          rv$form_error_text <- "Select a specific post column in Wide view to edit. Site/grand total columns are not editable."
+        }, delay = 0)
       }
       return()
     }
@@ -3028,7 +3076,11 @@ server <- function(input, output, session) {
     sid <- selected_post_id()
     if (is.na(sid)) {
       if (identical(input$display_form, "wide")) {
-        rv$form_error_text <- "Select a specific post column in Wide view to delete. Site/grand total columns are not deletable."
+        rv$form_error_text <- NULL
+        rv$form_error_at <- NULL
+        later::later(function() {
+          rv$form_error_text <- "Select a specific post column in Wide view to delete. Site/grand total columns are not deletable."
+        }, delay = 0)
       }
       return()
     }
