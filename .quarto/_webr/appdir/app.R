@@ -3308,10 +3308,21 @@ server <- function(input, output, session) {
 
   output$amendment_status <- renderUI({
     n_flagged <- sum(rv$posts$needs_amendment, na.rm = TRUE)
-    if (n_flagged == 0) {
-      tags$span(style = "color: #0f7d2c; font-weight: 600;", "All posts are within the current budget period.")
+    edit_hint <- if (identical(input$display_form, "wide")) {
+      "Click on a column to make edits to a post."
     } else {
-      tags$span(style = "color: #a94442; font-weight: 600;", paste(n_flagged, "post(s) require amendment before finalisation."))
+      "Click on a row to make edits to a post."
+    }
+
+    if (n_flagged == 0) {
+      tags$span(style = "font-weight: 600;", edit_hint)
+    } else {
+      amend_text <- if (n_flagged == 1) {
+        "1 post requires amendment before finalisation."
+      } else {
+        paste(n_flagged, "posts require amendment before finalisation.")
+      }
+      tags$span(style = "color: #a94442; font-weight: 600;", paste(amend_text, edit_hint, "Note: the input(s) requiring amendment will be marked with '!!!'"))
     }
   })
 
