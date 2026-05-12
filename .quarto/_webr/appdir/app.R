@@ -1351,12 +1351,7 @@ ui <- fluidPage(
         column(12, actionButton("add_or_update", "Add budget post", class = "btn-primary", style = "width: 100%;"))
       ),
       uiOutput("form_error"),
-      uiOutput("success_feedback"),
-      tags$div(
-        class = "row sidebar-split-row",
-        tags$div(class = "col-sm-6 sidebar-split-left", actionButton("edit_selected", "Edit post", style = "width: 100%;")),
-        tags$div(class = "col-sm-6 sidebar-split-right", actionButton("delete_selected", "Delete post", class = "btn-danger", style = "width: 100%;"))
-      )
+      uiOutput("success_feedback")
     ),
     mainPanel(
       tabsetPanel(
@@ -1405,12 +1400,18 @@ ui <- fluidPage(
             column(3, numericInput("filter_amount_max", "Max amount", value = 10000000)),
             column(6, textInput("filter_text", "Free-text search", value = "", placeholder = "Search in period, post name, site, category"))
           ),
+          fluidRow(
+            column(4, actionButton("edit_selected", "Edit post", style = "width: 100%;")),
+            column(4, actionButton("delete_selected", "Delete post", class = "btn-danger", style = "width: 100%;")),
+            column(4, actionButton("make_inactive", "Make inactive", class = "btn-warning", style = "width: 100%;"))
+          ),
+          br(),
           uiOutput("post_table_container"),
           br(),
           htmlOutput("amendment_status"),
+          uiOutput("inactive_posts_section"),
           br(),
-          h4("Visualization"),
-          plotlyOutput("visualization_plot", height = "600px"),
+          uiOutput("visualization_section"),
           br()
         ),
         tabPanel(
@@ -1523,6 +1524,7 @@ ui <- fluidPage(
 server <- function(input, output, session) {
   rv <- reactiveValues(
     posts = make_empty_posts(),
+    inactive_posts = make_empty_posts(),
     salaries = make_default_salaries(),
     workbook_name = "Budget",
     workbook_name_error = NULL,
@@ -2735,6 +2737,56 @@ server <- function(input, output, session) {
       formatRound("Amount", digits = 2, interval = 3, mark = ",")
   })
 
+  output$visualization_section <- renderUI({
+    if (nrow(rv$posts) == 0) return(NULL)
+    tagList(
+      h4("Visualization"),
+      plotlyOutput("visualization_plot", height = "600px")
+    )
+  })
+
+  output$inactive_posts_section <- renderUI({
+    if (nrow(rv$inactive_posts) == 0) return(NULL)
+    tagList(
+      br(),
+      h4("Inactive posts"),
+      DTOutput("inactive_posts_table")
+    )
+  })
+
+  output$inactive_posts_table <- renderDT({
+    df <- rv$inactive_posts
+    if (nrow(df) == 0) return(NULL)
+    display_df <- df %>%
+      select(id, post_name, center) %>%
+      mutate(
+        `Post name` = post_name,
+        Site = center,
+        Action = sprintf(
+          '<button class="btn btn-sm btn-success activate-post-btn" data-post-id="%d">Activate post</button>',
+          id
+        )
+      ) %>%
+      select(`Post name`, Site, Action)
+    datatable(
+      display_df,
+      escape = FALSE,
+      selection = "none",
+      rownames = FALSE,
+      options = list(
+        dom = "t",
+        paging = FALSE,
+        ordering = FALSE
+      ),
+      callback = JS(
+        "table.on('click', '.activate-post-btn', function() {",
+        "  var id = parseInt($(this).data('post-id'));",
+        "  Shiny.setInputValue('activate_post_id', id, {priority: 'event'});",
+        "});"
+      )
+    )
+  }, server = FALSE)
+
   output$post_table_container <- renderUI({
     if (isTRUE(input$display_form == "wide")) {
       DTOutput("wide_form_table")
@@ -2910,6 +2962,7 @@ server <- function(input, output, session) {
       return(
         datatable(
           tibble(Message = "No posts to display. Add posts or adjust filters."),
+          colnames = "",
           rownames = FALSE,
           options = list(dom = "t", paging = FALSE, searching = FALSE, ordering = FALSE)
         )
@@ -3148,6 +3201,38 @@ server <- function(input, output, session) {
     set_success("Post deleted.")
   })
 
+  observeEvent(input$make_inactive, {
+    sid <- selected_post_id()
+    if (is.na(sid)) {
+      if (identical(input$display_form, "wide")) {
+        wide_mode <- wide_column_mode_now()
+        rv$form_error_text <- NULL
+        rv$form_error_at <- NULL
+        later::later(function() {
+          if (identical(wide_mode, "category")) {
+            rv$form_error_text <- "Category columns in Wide view are aggregated and cannot be made inactive. Uncheck 'Collapse by category' and select a specific post column."
+          } else {
+            rv$form_error_text <- "Select a specific post column in Wide view to make inactive. Site/grand total columns are not selectable."
+          }
+        }, delay = 0)
+      }
+      return()
+    }
+    row_to_deactivate <- rv$posts %>% filter(id == sid)
+    rv$posts <- rv$posts %>% filter(id != sid)
+    rv$inactive_posts <- bind_rows(rv$inactive_posts, row_to_deactivate)
+    set_success("Post made inactive.")
+  })
+
+  observeEvent(input$activate_post_id, {
+    sid <- input$activate_post_id
+    if (is.null(sid) || is.na(sid)) return()
+    row_to_activate <- rv$inactive_posts %>% filter(id == sid)
+    rv$inactive_posts <- rv$inactive_posts %>% filter(id != sid)
+    rv$posts <- bind_rows(rv$posts, row_to_activate)
+    set_success("Post reactivated.")
+  })
+
   observeEvent(input$add_or_update, {
     rv$form_error_text <- NULL
     rv$export_error_text <- NULL
@@ -3307,6 +3392,8 @@ server <- function(input, output, session) {
   })
 
   output$amendment_status <- renderUI({
+    if (nrow(rv$posts) == 0) return(NULL)
+
     n_flagged <- sum(rv$posts$needs_amendment, na.rm = TRUE)
     edit_hint <- if (identical(input$display_form, "wide")) {
       "Click on a column to make edits to a post."
