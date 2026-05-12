@@ -1089,6 +1089,18 @@ ui <- fluidPage(
     table.dataTable tbody td.wide-col-selected {
       background-color: rgba(176, 190, 217, 0.55) !important;
     }
+    .wide-header-site {
+      text-align: center;
+    }
+    .wide-header-spacer {
+      min-width: 16px;
+      width: 16px;
+      border: none;
+      background: #fff;
+    }
+    .wide-header-total {
+      font-weight: 700;
+    }
 
     h4 {
       font-size: 20px;
@@ -2760,7 +2772,20 @@ server <- function(input, output, session) {
     }
   })
 
-  build_wide_from_long <- function(long_df, include_site_totals = TRUE) {
+  include_site_totals_now <- function() {
+    squash <- input$squash_dims
+    if (is.null(squash)) squash <- character(0)
+    !any(c("Site", "Post name") %in% squash)
+  }
+
+  wide_column_mode_now <- function() {
+    squash <- input$squash_dims
+    if (is.null(squash)) squash <- character(0)
+    if ("Category" %in% squash) "category" else "post"
+  }
+
+  build_wide_from_long <- function(long_df, include_site_totals = TRUE, column_mode = c("post", "category")) {
+    column_mode <- match.arg(column_mode)
     if (!nrow(long_df)) {
       return(list(
         data = tibble(Period = character()),
@@ -2768,7 +2793,8 @@ server <- function(input, output, session) {
         posts_by_site = list(),
         spacer_cols = character(),
         numeric_cols = character(),
-        flagged_post_cols = character()
+        flagged_post_cols = character(),
+        column_mode = column_mode
       ))
     }
 
@@ -2781,8 +2807,21 @@ server <- function(input, output, session) {
         posts_by_site = list(),
         spacer_cols = character(),
         numeric_cols = character(),
-        flagged_post_cols = character()
+        flagged_post_cols = character(),
+        column_mode = column_mode
       ))
+    }
+
+    if (identical(column_mode, "category")) {
+      post_category_lookup <- rv$posts %>%
+        transmute(Site = center, `Post name` = post_name, Category_lookup = category) %>%
+        distinct()
+
+      data_rows <- data_rows %>%
+        left_join(post_category_lookup, by = c("Site", "Post name")) %>%
+        mutate(Category_resolved = if_else(!is.na(Category_lookup) & nzchar(Category_lookup), Category_lookup, Category))
+    } else {
+      data_rows <- data_rows %>% mutate(Category_resolved = Category)
     }
 
     amount_col <- if ("Amount" %in% names(data_rows)) "Amount" else if ("Value" %in% names(data_rows)) "Value" else NULL
@@ -2791,7 +2830,11 @@ server <- function(input, output, session) {
     periods_vec <- unique(data_rows$Period)
     sites_vec <- unique(data_rows$Site)
     posts_by_site <- lapply(sites_vec, function(site) {
-      unique(data_rows$`Post name`[data_rows$Site == site])
+      if (identical(column_mode, "category")) {
+        unique(data_rows$Category_resolved[data_rows$Site == site])
+      } else {
+        unique(data_rows$`Post name`[data_rows$Site == site])
+      }
     })
     names(posts_by_site) <- sites_vec
 
@@ -2807,16 +2850,22 @@ server <- function(input, output, session) {
       for (post in posts_by_site[[site]]) {
         col_name <- paste(site, post, sep = " > ")
         wide_df[[col_name]] <- vapply(periods_vec, function(p) {
-          vals <- data_rows %>%
-            filter(Period == p, Site == site, `Post name` == post) %>%
-            pull(all_of(amount_col))
+          vals <- if (identical(column_mode, "category")) {
+            data_rows %>%
+              filter(Period == p, Site == site, Category_resolved == post) %>%
+              pull(all_of(amount_col))
+          } else {
+            data_rows %>%
+              filter(Period == p, Site == site, `Post name` == post) %>%
+              pull(all_of(amount_col))
+          }
           if (!length(vals)) return(NA_real_)
           sum(as.numeric(vals), na.rm = TRUE)
         }, numeric(1))
         post_cols <- c(post_cols, col_name)
 
         # Mark post columns that contain at least one amendment-required post.
-        if (any(data_rows$Site == site & data_rows$`Post name` == post & data_rows$needs_amendment, na.rm = TRUE)) {
+        if (identical(column_mode, "post") && any(data_rows$Site == site & data_rows$`Post name` == post & data_rows$needs_amendment, na.rm = TRUE)) {
           flagged_post_cols <- c(flagged_post_cols, col_name)
         }
       }
@@ -2877,7 +2926,8 @@ server <- function(input, output, session) {
       posts_by_site = posts_by_site,
       spacer_cols = spacer_cols,
       numeric_cols = numeric_cols,
-      flagged_post_cols = unique(flagged_post_cols)
+      flagged_post_cols = unique(flagged_post_cols),
+      column_mode = column_mode
     )
   }
 
@@ -2895,11 +2945,10 @@ server <- function(input, output, session) {
       )
     }
 
-    squash <- input$squash_dims
-    if (is.null(squash)) squash <- character(0)
-    include_site_totals <- !any(c("Site", "Post name") %in% squash)
+    include_site_totals <- include_site_totals_now()
+    wide_mode <- wide_column_mode_now()
 
-    wide_obj <- build_wide_from_long(long_data, include_site_totals = include_site_totals)
+    wide_obj <- build_wide_from_long(long_data, include_site_totals = include_site_totals, column_mode = wide_mode)
     wide_df <- wide_obj$data
     numeric_cols <- wide_obj$numeric_cols
     flagged_post_cols <- wide_obj$flagged_post_cols
@@ -2912,12 +2961,12 @@ server <- function(input, output, session) {
       tags$th(rowspan = 2, "Period"),
       lapply(seq_len(nrow(site_counts)), function(i) {
         tagList(
-          tags$th(colspan = site_counts$n_posts[i] + ifelse(include_site_totals, 1, 0), site_counts$Site[i], style = "text-align:center;"),
-          if (i < nrow(site_counts)) tags$th(rowspan = 2, "", style = "min-width:16px;width:16px;border:none;background:#fff;")
+          tags$th(colspan = site_counts$n_posts[i] + ifelse(include_site_totals, 1, 0), site_counts$Site[i], class = "wide-header-site"),
+          if (i < nrow(site_counts)) tags$th(rowspan = 2, "", class = "wide-header-spacer")
         )
       }),
-      tags$th(rowspan = 2, "", style = "min-width:16px;width:16px;border:none;background:#fff;"),
-      tags$th(colspan = 1, "All sites", style = "text-align:center;")
+      tags$th(rowspan = 2, "", class = "wide-header-spacer"),
+      tags$th(colspan = 1, "All sites", class = "wide-header-site")
     )
     header_bottom <- tags$tr(
       unlist(lapply(seq_len(nrow(site_counts)), function(i) {
@@ -2925,12 +2974,12 @@ server <- function(input, output, session) {
         posts <- wide_obj$posts_by_site[[site]]
         cells <- lapply(posts, function(p) tags$th(p))
         if (isTRUE(include_site_totals)) {
-          cells <- c(cells, list(tags$th("Site total", style = "font-weight:700;")))
+          cells <- c(cells, list(tags$th("Site total", class = "wide-header-total")))
         }
         cells
       })
       , recursive = FALSE),
-      tags$th("Total", style = "font-weight:700;")
+      tags$th("Total", class = "wide-header-total")
     )
     table_header <- withTags(table(class = "display", thead(header_top, header_bottom)))
 
@@ -3014,11 +3063,10 @@ server <- function(input, output, session) {
       if (!nrow(long_tbl)) return(NA_integer_)
       col_idx <- as.integer(col_guard)
 
-      squash <- input$squash_dims
-      if (is.null(squash)) squash <- character(0)
-      include_site_totals <- !any(c("Site", "Post name") %in% squash)
+      include_site_totals <- include_site_totals_now()
+      wide_mode <- wide_column_mode_now()
 
-      wide_obj <- build_wide_from_long(long_tbl, include_site_totals = include_site_totals)
+      wide_obj <- build_wide_from_long(long_tbl, include_site_totals = include_site_totals, column_mode = wide_mode)
       wide_cols <- names(wide_obj$data)
       if (col_idx < 1 || col_idx > length(wide_cols)) return(NA_integer_)
 
@@ -3026,6 +3074,8 @@ server <- function(input, output, session) {
       if (identical(col_name, "Period") || col_name %in% wide_obj$spacer_cols || grepl("Site total$", col_name) || identical(col_name, "All sites > Total")) {
         return(NA_integer_)
       }
+
+      if (identical(wide_mode, "category")) return(NA_integer_)
 
       parts <- strsplit(col_name, " > ", fixed = TRUE)[[1]]
       if (length(parts) < 2) return(NA_integer_)
@@ -3059,10 +3109,15 @@ server <- function(input, output, session) {
     sid <- selected_post_id()
     if (is.na(sid)) {
       if (identical(input$display_form, "wide")) {
+        wide_mode <- wide_column_mode_now()
         rv$form_error_text <- NULL
         rv$form_error_at <- NULL
         later::later(function() {
-          rv$form_error_text <- "Select a specific post column in Wide view to edit. Site/grand total columns are not editable."
+          if (identical(wide_mode, "category")) {
+            rv$form_error_text <- "Category columns in Wide view are aggregated and cannot be edited. Uncheck 'Collapse by category' and select a specific post column."
+          } else {
+            rv$form_error_text <- "Select a specific post column in Wide view to edit. Site/grand total columns are not editable."
+          }
         }, delay = 0)
       }
       return()
@@ -3073,8 +3128,8 @@ server <- function(input, output, session) {
 
     rv$editing_id <- sid
     rv$variable_defaults <- unlist(row$value_vector[[1]], use.names = FALSE)
-  rv$constant_expr_draft <- row$constant_expr
-  rv$function_expr_draft <- row$function_expr
+    rv$constant_expr_draft <- row$constant_expr
+    rv$function_expr_draft <- row$function_expr
 
     updateTextInput(session, "post_name", value = row$post_name)
     updateSelectInput(session, "center", selected = row$center)
@@ -3105,10 +3160,15 @@ server <- function(input, output, session) {
     sid <- selected_post_id()
     if (is.na(sid)) {
       if (identical(input$display_form, "wide")) {
+        wide_mode <- wide_column_mode_now()
         rv$form_error_text <- NULL
         rv$form_error_at <- NULL
         later::later(function() {
-          rv$form_error_text <- "Select a specific post column in Wide view to delete. Site/grand total columns are not deletable."
+          if (identical(wide_mode, "category")) {
+            rv$form_error_text <- "Category columns in Wide view are aggregated and cannot be deleted. Uncheck 'Collapse by category' and select a specific post column."
+          } else {
+            rv$form_error_text <- "Select a specific post column in Wide view to delete. Site/grand total columns are not deletable."
+          }
         }, delay = 0)
       }
       return()
