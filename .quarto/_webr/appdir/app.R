@@ -520,10 +520,10 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
     salaries = salaries_lookup,
     inflation_pct = as.numeric(inflation_pct),
     months = months,
-    fte_monthly_total = fte_monthly_total,
-    fte_monthly_sum = sum(fte_monthly_total, na.rm = TRUE),
-    fte_yearly_total = fte_yearly_total,
-    fte_yearly_sum = sum(fte_yearly_total, na.rm = TRUE),
+    FTE_monthly_all = fte_monthly_total,
+    FTE_all = fte_yearly_total,
+    FTE_total = sum(fte_monthly_total, na.rm = TRUE),
+    FTE_monthly = if (!is.na(fte)) fte / 12 else NA_real_,
     inflation_month_factors = inflation_month_factors,
     inflation_year_factors = inflation_year_factors,
     apply_inflation_month = function(base_value) {
@@ -613,7 +613,7 @@ build_long_budget <- function(posts_tbl, budget_start, budget_end, salaries_look
 
   month_fte_total_for <- function(months) {
     map_dbl(months, function(m) {
-      sum(posts_tbl$fte[posts_tbl$start_date <= m & posts_tbl$end_date >= m], na.rm = TRUE)
+      sum(posts_tbl$fte[posts_tbl$start_date <= m & posts_tbl$end_date >= m], na.rm = TRUE) / 12
     })
   }
 
@@ -657,7 +657,7 @@ build_long_budget <- function(posts_tbl, budget_start, budget_end, salaries_look
 post_total <- function(post_row, all_posts_tbl = post_row, salaries_lookup = data.frame(), inflation_pct = 0, salaries_tbl = NULL) {
   row_months <- month_sequence(post_row$start_date, post_row$end_date)
   row_fte_monthly_total <- map_dbl(row_months, function(m) {
-    sum(all_posts_tbl$fte[all_posts_tbl$start_date <= m & all_posts_tbl$end_date >= m], na.rm = TRUE)
+    sum(all_posts_tbl$fte[all_posts_tbl$start_date <= m & all_posts_tbl$end_date >= m], na.rm = TRUE) / 12
   })
 
   resolved <- resolve_post_values(
@@ -1348,7 +1348,7 @@ ui <- fluidPage(
       selectInput("center", required_label("Site"), choices = c("", make_default_sites()$name), selected = ""),
       selectInput("category", required_label("Category"), choices = c("", make_default_categories()$name), selected = ""),
       dateRangeInput("post_date_range", required_label("Date range"), start = NA, end = NA, width = "100%"),
-      numericInput("fte", "FTE", value = NA_real_, min = 0, step = 0.1),
+      numericInput("fte", "Full-time equivalent (FTE) / year", value = NA_real_, min = 0, step = 0.1),
       selectInput("value_mode", "How should amount be defined?", choices = c("Formula" = "function", "Variable" = "variable"), selected = "function"),
       radioButtons("value_unit", "Input amount per", choices = c("Month" = "month", "Year" = "year"), selected = "month", inline = TRUE),
       uiOutput("value_inputs_ui"),
@@ -1563,7 +1563,7 @@ server <- function(input, output, session) {
     editing_template_id = NA_integer_,
     variable_defaults = numeric(),
     constant_expr_draft = "0",
-    function_expr_draft = "rep((510000*FTE)/12, n)",
+    function_expr_draft = character(),
     value_inputs_refresh = 0L,
     form_error_text = NULL,
     form_error_at = NULL,
@@ -1626,7 +1626,6 @@ server <- function(input, output, session) {
     updateNumericInput(session, "fte", value = NA_real_)
     updateSelectInput(session, "value_mode", selected = "function")
     updateRadioButtons(session, "value_unit", selected = "month")
-    updateTextInput(session, "constant_expr", value = "0")
     updateTextInput(session, "function_expr", value = "")
     updateTextAreaInput(session, "note", value = "")
     rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L
@@ -1774,7 +1773,6 @@ server <- function(input, output, session) {
       ) %>%
       mutate(
         Amount = case_when(
-          mode == "constant" ~ constant_expr,
           mode == "function" ~ function_expr,
           TRUE ~ "variable"
         )
@@ -2317,67 +2315,6 @@ server <- function(input, output, session) {
     visible_tpls$id[sel]
   })
 
-  observeEvent(input$tpl_edit_selected, {
-    tpl_id <- selected_template_id()
-    req(!is.na(tpl_id))
-    row <- rv$template_registry %>% filter(id == tpl_id)
-    req(nrow(row) == 1)
-    rv$editing_template_id <- tpl_id
-    updateTextInput(session, "tpl_name", value = row$name)
-    updateSelectInput(session, "tpl_category", selected = row$category)
-    updateSelectInput(session, "tpl_mode", selected = row$mode)
-    updateSelectInput(session, "tpl_unit", selected = row$unit)
-    updateTextAreaInput(session, "tpl_note", value = row$note)
-    set_success("Template loaded into fields for editing.")
-  })
-
-  observeEvent(input$tpl_add, {
-    rv$templates_error_text <- NULL
-    nm <- trimws(input$tpl_name)
-    if (!nzchar(nm)) {
-      rv$templates_error_text <- "Template name is required."
-      return()
-    }
-
-    is_new <- is.na(rv$editing_template_id)
-    tpl_id <- if (is_new) rv$next_template_id else rv$editing_template_id
-    prev <- rv$template_registry %>% filter(id == tpl_id)
-    prev_default <- if (nrow(prev) == 1) isTRUE(prev$is_default) else FALSE
-
-    dup <- rv$template_registry %>% filter(!is_deleted, id != tpl_id, tolower(name) == tolower(nm))
-    if (nrow(dup) > 0) {
-      rv$templates_error_text <- "Template name already exists."
-      return()
-    }
-
-    new_tpl <- tibble(
-      id = as.integer(tpl_id),
-      name = nm,
-      category = ifelse(is.null(input$tpl_category), "", input$tpl_category),
-      center = "",
-      mode = input$tpl_mode,
-      unit = input$tpl_unit,
-      constant_expr = "0",
-      function_expr = "rep(0, n)",
-      fte = NA_real_,
-      note = input$tpl_note,
-      values = list(numeric()),
-      duration_years = NA_real_,
-      is_default = prev_default,
-      is_deleted = FALSE
-    )
-
-    rv$template_registry <- rv$template_registry %>% filter(id != tpl_id) %>% bind_rows(new_tpl)
-    if (is_new) rv$next_template_id <- rv$next_template_id + 1L
-    rv$editing_template_id <- NA_integer_
-    updateTextInput(session, "tpl_name", value = "")
-    updateSelectInput(session, "tpl_category", selected = "")
-    updateSelectInput(session, "tpl_mode", selected = "function")
-    updateSelectInput(session, "tpl_unit", selected = "month")
-    updateTextAreaInput(session, "tpl_note", value = "")
-    set_success(if (is_new) paste("Template added:", nm) else paste("Template updated:", nm))
-  })
-
   observeEvent(input$tpl_delete_selected, {
     tpl_id <- selected_template_id()
     req(!is.na(tpl_id))
@@ -2422,7 +2359,6 @@ server <- function(input, output, session) {
       updateSelectInput(session, "category", selected = "")
       updateDateRangeInput(session, "post_date_range", start = input$budget_start, end = input$budget_end)
       updateNumericInput(session, "fte", value = NA_real_)
-      updateTextInput(session, "constant_expr", value = "0")
       updateTextInput(session, "function_expr", value = "")
       updateTextAreaInput(session, "note", value = "")
       rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L
@@ -2477,7 +2413,6 @@ server <- function(input, output, session) {
     selected_mode <- if (identical(tpl$mode, "variable")) "variable" else "function"
     updateSelectInput(session, "value_mode", selected = selected_mode)
     updateRadioButtons(session, "value_unit", selected = tpl$unit)
-    updateTextInput(session, "constant_expr", value = tpl$constant_expr)
     updateTextInput(session, "function_expr", value = tpl$function_expr)
     updateNumericInput(session, "fte", value = tpl$fte)
     updateTextAreaInput(session, "note", value = tpl$note)
@@ -2586,7 +2521,7 @@ server <- function(input, output, session) {
 
     if (mode == "function") {
       tagList(
-        textInput("function_expr", "Formula expression", value = isolate(rv$function_expr_draft), placeholder = "Expression using n, FTE, fte_monthly_total/fte_yearly_total, salary_identifier$total_m and inflation helpers"),
+        textInput("function_expr", "Formula expression", value = isolate(rv$function_expr_draft), placeholder = "Expression using n, FTE, FTE_monthly_all/FTE_all/FTE_total, salary_identifier$total_m and inflation helpers"),
         actionButton("show_formula_help", "Help: available formula variables")
       )
     } else {
@@ -3194,10 +3129,6 @@ server <- function(input, output, session) {
     tbl$id[sel]
   })
 
-  observeEvent(input$constant_expr, {
-    rv$constant_expr_draft <- input$constant_expr
-  }, ignoreInit = TRUE)
-
   observeEvent(input$function_expr, {
     rv$function_expr_draft <- input$function_expr
   }, ignoreInit = TRUE)
@@ -3236,7 +3167,6 @@ server <- function(input, output, session) {
     selected_mode <- if (identical(row$value_mode, "variable")) "variable" else "function"
     updateSelectInput(session, "value_mode", selected = selected_mode)
     updateRadioButtons(session, "value_unit", selected = row$value_unit)
-    updateTextInput(session, "constant_expr", value = row$constant_expr)
     updateTextInput(session, "function_expr", value = row$function_expr)
     updateTextAreaInput(session, "note", value = row$note)
 
@@ -3349,7 +3279,7 @@ server <- function(input, output, session) {
       fte = suppressWarnings(as.numeric(input$fte)),
       value_mode = input$value_mode,
       value_unit = input$value_unit,
-      constant_expr = ifelse(is.null(input$constant_expr), rv$constant_expr_draft, input$constant_expr),
+      constant_expr = rv$constant_expr_draft,
       function_expr = ifelse(is.null(input$function_expr), rv$function_expr_draft, input$function_expr),
       value_vector = list(vec),
       note = input$note,
@@ -3718,13 +3648,13 @@ server <- function(input, output, session) {
       tags$p(tags$b("Note:"), " entering a single value repeats that value for every period."),
       tags$p("Available in amount formulas (Formula mode):"),
       tags$ul(
-        tags$li(tags$b("FTE"), " - current post FTE"),
         tags$li(tags$b("n"), " - required vector length for the selected input period (months or years)"),
         tags$li(tags$b("months"), " - month vector for current post date range"),
-        tags$li(tags$b("fte_monthly_total"), " - vector of summed FTE across all posts for each month in the current post range"),
-        tags$li(tags$b("fte_monthly_sum"), " - scalar sum of fte_monthly_total"),
-        tags$li(tags$b("fte_yearly_total"), " - year vector (post-year buckets) of summed FTE across all posts"),
-        tags$li(tags$b("fte_yearly_sum"), " - scalar sum of fte_yearly_total"),
+        tags$li(tags$b("FTE"), " - FTE per year as input by user"),
+        tags$li(tags$b("FTE_monthly"), " - FTE of this post per month (FTE / 12)"),
+        tags$li(tags$b("FTE_all"), " - year vector (post-year buckets) of summed monthly FTE across all posts"),
+        tags$li(tags$b("FTE_monthly_all"), " - vector of summed monthly FTE (yearly FTE / 12) across all posts for each month in the current post range"),
+        tags$li(tags$b("FTE_total"), " - scalar sum of all period-wise FTEs across all posts (sum of FTE_monthly_all)"),
         tags$li(tags$b("inflation_pct"), " - yearly inflation percentage"),
         tags$li(tags$b("inflation_month_factors"), " - month-wise multipliers based on calendar year relative to the first selected month"),
         tags$li(tags$b("inflation_year_factors"), " - year-wise multipliers"),
