@@ -5,6 +5,9 @@ library(lubridate)
 library(purrr)
 library(tibble)
 library(DT)
+library(ggplot2)
+library(scales)
+library(plotly)
 
 start_default <- floor_date(Sys.Date(), "month")
 end_default <- start_default %m+% years(5) - days(1)
@@ -1389,7 +1392,11 @@ ui <- fluidPage(
           ),
           uiOutput("post_table_container"),
           br(),
-          htmlOutput("amendment_status")
+          htmlOutput("amendment_status"),
+          br(),
+          h4("Visualization"),
+          plotlyOutput("visualization_plot", height = "600px"),
+          br()
         ),
         tabPanel(
           "Salary calculations",
@@ -3195,6 +3202,210 @@ server <- function(input, output, session) {
       tags$span(style = "color: #a94442; font-weight: 600;", paste(n_flagged, "post(s) require amendment before finalisation."))
     }
   })
+
+  # Visualization data: aggregate by month, site, and category for stacked area chart
+  visualization_data <- reactive({
+    long_df <- build_long_budget(rv$posts, input$budget_start, input$budget_end, salaries_lookup = make_salary_lookup(rv$salaries), inflation_pct = input$inflation_pct, salaries_tbl = rv$salaries)
+    
+    if (!nrow(long_df)) {
+      return(tibble(
+        month = as.Date(character()),
+        center = character(),
+        category = character(),
+        value = numeric(),
+        facet = character()
+      ))
+    }
+
+    # Apply same filters as filtered_posts() to respect table viewer filtering
+    if (!is.null(input$filter_month_range) && all(!is.na(input$filter_month_range))) {
+      mstart <- as.Date(input$filter_month_range[1])
+      mend <- as.Date(input$filter_month_range[2])
+      long_df <- long_df %>% filter(month >= mstart, month <= mend)
+    }
+
+    if (!is.null(input$filter_center) && length(input$filter_center) > 0) {
+      long_df <- long_df %>% filter(center %in% input$filter_center)
+    }
+
+    if (!is.null(input$filter_category) && length(input$filter_category) > 0) {
+      long_df <- long_df %>% filter(category %in% input$filter_category)
+    }
+
+    if (!nrow(long_df)) {
+      return(tibble(
+        month = as.Date(character()),
+        center = character(),
+        category = character(),
+        value = numeric(),
+        facet = character()
+      ))
+    }
+
+    # Aggregate by month, site (center), and category (monthly values)
+    agg_monthly <- long_df %>%
+      mutate(month = as.Date(paste0(format(month, "%Y-%m"), "-01"))) %>%
+      group_by(month, center, category) %>%
+      summarise(value = sum(value, na.rm = TRUE), .groups = "drop")
+    
+    # Ensure all month-site-category combinations exist (fill missing with 0)
+    all_months <- unique(agg_monthly$month)
+    all_centers <- unique(agg_monthly$center)
+    all_categories <- unique(agg_monthly$category)
+    
+    complete_grid <- expand_grid(
+      month = all_months,
+      center = all_centers,
+      category = all_categories
+    )
+    
+    agg_data <- complete_grid %>%
+      left_join(agg_monthly, by = c("month", "center", "category")) %>%
+      replace_na(list(value = 0)) %>%
+      arrange(center, category, month) %>%
+      group_by(center, category) %>%
+      mutate(value = cumsum(value)) %>%
+      ungroup() %>%
+      mutate(facet = center)
+
+    # Create "All sites" aggregate: sum monthly values across sites, then cumulative sum once.
+    all_sites_data <- complete_grid %>%
+      left_join(agg_monthly, by = c("month", "center", "category")) %>%
+      replace_na(list(value = 0)) %>%
+      group_by(month, category) %>%
+      summarise(value = sum(value, na.rm = TRUE), .groups = "drop") %>%
+      arrange(category, month) %>%
+      group_by(category) %>%
+      mutate(value = cumsum(value)) %>%
+      ungroup() %>%
+      mutate(center = "ALL_SITES_TOTAL", facet = "All sites")
+
+    # Combine both
+    bind_rows(agg_data, all_sites_data) %>%
+      mutate(facet = factor(facet, levels = c(sort(unique(agg_data$center)), "All sites")))
+  })
+
+  output$visualization_plot <- renderPlotly({
+    viz_data <- visualization_data()
+    
+    if (!nrow(viz_data)) {
+      p <- ggplot() +
+        geom_blank() +
+        labs(title = "No data to display. Add posts to view budget visualization.") +
+        theme_minimal()
+      return(ggplotly(p, tooltip = "none"))
+    }
+
+    # Color palette for categories
+    unique_cats <- sort(unique(viz_data$category))
+    n_cats <- length(unique_cats)
+    color_palette <- colorRampPalette(c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"))(n_cats)
+    names(color_palette) <- unique_cats
+
+    facets <- levels(viz_data$facet)
+
+    # Show each category in the legend exactly once, in the first facet where it appears with value > 0.
+    cat_legend_facet <- setNames(rep(NA_character_, length(unique_cats)), unique_cats)
+    for (cat_name in unique_cats) {
+      for (f in facets) {
+        has_positive <- viz_data %>%
+          filter(facet == f, category == cat_name) %>%
+          summarise(any_pos = any(value > 0, na.rm = TRUE)) %>%
+          pull(any_pos)
+        if (isTRUE(has_positive)) {
+          cat_legend_facet[[cat_name]] <- f
+          break
+        }
+      }
+    }
+    
+    # Calculate max value across non-"All sites" facets for aligned y-axes
+    non_all_data <- viz_data %>% filter(facet != "All sites")
+    y_max_non_all <- if (nrow(non_all_data) > 0) max(non_all_data$value, na.rm = TRUE) * 1.05 else 0
+    
+    plots <- lapply(facets, function(f) {
+      facet_data <- viz_data %>% filter(facet == f)
+      if (!nrow(facet_data)) {
+        return(plot_ly() %>% add_trace(y = numeric(), name = f))
+      }
+      
+      # Only include categories present in this facet
+      present_cats <- sort(unique(facet_data$category))
+      
+      p <- plot_ly()
+      for (cat_name in present_cats) {
+        cat_data <- facet_data %>%
+          filter(category == cat_name) %>%
+          arrange(month)
+
+        # Trim leading zero cumulative values so hover only lists categories that are present (> 0).
+        first_positive_idx <- which(cat_data$value > 0)[1]
+        if (is.na(first_positive_idx)) next
+        cat_data <- cat_data[first_positive_idx:nrow(cat_data), , drop = FALSE]
+
+        show_legend_trace <- identical(f, cat_legend_facet[[cat_name]])
+        
+        p <- p %>%
+          add_trace(
+            x = cat_data$month,
+            y = cat_data$value,
+            name = cat_name,
+            type = "scatter",
+            mode = "lines",
+            fill = "tonexty",
+            fillcolor = color_palette[cat_name],
+            line = list(width = 0),
+            stackgroup = "one",
+            legendgroup = cat_name,
+            showlegend = show_legend_trace,
+            hovertemplate = paste0("%{x|%Y-%m}<br>", cat_name, "<br>%{y:,}<extra></extra>")
+          )
+      }
+      
+      # Set y-axis range: aligned for non-All sites, free for All sites
+      y_axis_config <- list(title = if (f == facets[1]) "Cumulative amount" else "")
+      if (f != "All sites" && y_max_non_all > 0) {
+        y_axis_config$range <- c(0, y_max_non_all)
+      }
+      
+      p <- p %>%
+        layout(
+          xaxis = list(title = "", tickformat = "%Y-%m"),
+          yaxis = y_axis_config,
+          hovermode = "x unified",
+          showlegend = FALSE
+        )
+      
+      p
+    })
+    
+    n_facets <- length(facets)
+    facet_annotations <- lapply(seq_along(facets), function(i) {
+      list(
+        text = facets[[i]],
+        x = (i - 0.5) / n_facets,
+        y = 1.06,
+        xref = "paper",
+        yref = "paper",
+        xanchor = "center",
+        yanchor = "bottom",
+        showarrow = FALSE,
+        font = list(size = 12)
+      )
+    })
+
+    subplot(plots, nrows = 1, shareY = FALSE, margin = 0.05) %>%
+      config(toImageButtonOptions = list(format = "png", filename = paste0("budget_visualization_", format(Sys.Date(), "%Y%m%d")))) %>%
+      layout(
+        title = list(text = "Cumulative budget over time by category and site", x = 0.5, xanchor = "center"),
+        showlegend = TRUE,
+        hovermode = "x unified",
+        margin = list(t = 110),
+        annotations = facet_annotations
+      )
+  })
+
+
 
   output$export_control <- renderUI({
     n_flagged <- sum(rv$posts$needs_amendment, na.rm = TRUE)
