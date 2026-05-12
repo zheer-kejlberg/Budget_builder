@@ -3411,9 +3411,18 @@ server &lt;- function(input, output, session) {
       }
     }
     
-    # Calculate max value across non-"All sites" facets for aligned y-axes
+    # Calculate max stacked total across non-"All sites" facets for aligned y-axes.
+    # Use per-month sums across categories (stack height), not max of individual categories.
     non_all_data &lt;- viz_data %&gt;% filter(facet != "All sites")
-    y_max_non_all &lt;- if (nrow(non_all_data) &gt; 0) max(non_all_data$value, na.rm = TRUE) * 1.05 else 0
+    y_max_non_all &lt;- if (nrow(non_all_data) &gt; 0) {
+      non_all_data %&gt;%
+        group_by(facet, month) %&gt;%
+        summarise(total_value = sum(value, na.rm = TRUE), .groups = "drop") %&gt;%
+        summarise(max_total = max(total_value, na.rm = TRUE)) %&gt;%
+        pull(max_total) * 1.05
+    } else {
+      0
+    }
     
     plots &lt;- lapply(facets, function(f) {
       facet_data &lt;- viz_data %&gt;% filter(facet == f)
