@@ -1397,8 +1397,20 @@ ui <- fluidPage(
           ),
           fluidRow(
             column(3, numericInput("filter_amount_min", "Min amount", value = 0)),
-            column(3, numericInput("filter_amount_max", "Max amount", value = 10000000)),
+            column(3, numericInput("filter_amount_max", "Max amount", value = 50000000)),
             column(6, textInput("filter_text", "Free-text search", value = "", placeholder = "Search in period, post name, site, category"))
+          ),
+          fluidRow(
+            tags$div(
+              style = "display: flex; justify-content: flex-end; padding: 10px 15px 0;",
+              actionButton(
+                "help_refresh_table",
+                "Refresh table",
+                icon = icon("refresh"),
+                class = "btn-info",
+                title = "If the budget table appears stuck, click to refresh the budget tables without reloading the page."
+              )
+            )
           ),
           fluidRow(
             style = "padding: 15px 0;",
@@ -1558,6 +1570,7 @@ server <- function(input, output, session) {
     settings_error_text = NULL,
     pending_post_row = NULL,
     amend_fields = character(),
+    table_refresh_nonce = 0L,
     success_text = NULL,
     success_at = NULL
   )
@@ -1575,6 +1588,11 @@ server <- function(input, output, session) {
     rv$success_text <- msg
     rv$success_at <- Sys.time()
   }
+
+  observeEvent(input$help_refresh_table, {
+    rv$table_refresh_nonce <- rv$table_refresh_nonce + 1L
+    set_success("Budget table refresh triggered.")
+  })
 
   is_amended_field <- function(field_id) {
     field_id %in% rv$amend_fields
@@ -2571,6 +2589,8 @@ server <- function(input, output, session) {
   })
 
   filtered_posts <- reactive({
+    rv$table_refresh_nonce
+
     build_display_table <- function(period_choice, apply_filters = TRUE) {
       if (!nrow(rv$posts)) {
         return(tibble(
