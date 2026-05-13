@@ -1353,7 +1353,6 @@ ui <- fluidPage(
     "
     Shiny.addCustomMessageHandler('save-pdf', function(payload) {
       if (typeof window.jspdf === 'undefined') { console.error('jsPDF not loaded'); return; }
-      if (typeof html2canvas === 'undefined') { console.error('html2canvas not loaded'); return; }
 
       var vizEl = document.getElementById('visualization_plot');
       var dtWrapper = document.querySelector('#wide_form_table .dataTables_wrapper');
@@ -1364,7 +1363,6 @@ ui <- fluidPage(
       if (!headTable) headTable = dtWrapper.querySelector('table.dataTable');
       if (!bodyTable) bodyTable = headTable;
 
-      // --- Draw table directly to canvas (no DOM capture = no viewport clipping) ---
       var firstBodyRow = bodyTable ? bodyTable.querySelector('tbody tr') : null;
       if (!firstBodyRow) { console.warn('No body rows'); return; }
 
@@ -1377,9 +1375,11 @@ ui <- fluidPage(
       var cx = 0;
       for (var i = 0; i < nCols; i++) { colX.push(cx); cx += colWidths[i]; }
 
-      var ROW_H = 22;
       var FONT_SZ = 10;
       var PAD = 5;
+      var LINE_H = FONT_SZ + 4;
+      var HEAD_PAD_V = 6;
+      var BODY_ROW_H = 22;
 
       // Collect header rows
       var headRows = [];
@@ -1393,7 +1393,7 @@ ui <- fluidPage(
       }
       var nHeadRows = headRows.length;
 
-      // Collect body rows with computed styles
+      // Collect body rows
       var bodyRows = [];
       var tbodyEl = bodyTable ? bodyTable.querySelector('tbody') : null;
       if (tbodyEl) {
@@ -1417,7 +1417,58 @@ ui <- fluidPage(
         });
       }
       var nBodyRows = bodyRows.length;
-      var totalH = (nHeadRows + nBodyRows) * ROW_H;
+
+      // Use a scratch canvas for text measurement
+      var measCanvas = document.createElement('canvas');
+      var measCtx = measCanvas.getContext('2d');
+
+      function measureLines(text, maxW, fontStr) {
+        measCtx.font = fontStr;
+        if (!text) return [''];
+        var words = text.split(' ');
+        var lines = [];
+        var line = '';
+        for (var n = 0; n < words.length; n++) {
+          var test = line ? line + ' ' + words[n] : words[n];
+          if (measCtx.measureText(test).width > maxW && line) {
+            lines.push(line);
+            line = words[n];
+          } else {
+            line = test;
+          }
+        }
+        if (line) lines.push(line);
+        return lines.length ? lines : [''];
+      }
+
+      // Pre-compute header row heights based on wrapped text
+      var headFontStr = 'bold ' + FONT_SZ + 'px Arial,sans-serif';
+      var rsUntilPre = [];
+      for (var ip = 0; ip < nCols; ip++) rsUntilPre.push(-1);
+
+      var headRowHeights = headRows.map(function(row, ri) {
+        var maxLines = 1;
+        var col = 0;
+        row.forEach(function(cell) {
+          while (col < nCols && rsUntilPre[col] >= ri) col++;
+          if (col >= nCols) return;
+          var span = Math.min(cell.cs || 1, nCols - col);
+          var cellW = 0;
+          for (var k = 0; k < span; k++) { if (col + k < nCols) cellW += colWidths[col + k]; }
+          var lines = measureLines(cell.text, cellW - 2 * PAD, headFontStr);
+          maxLines = Math.max(maxLines, lines.length);
+          for (var k2 = 0; k2 < span; k2++) { if (col + k2 < nCols) rsUntilPre[col + k2] = ri + (cell.rs || 1) - 1; }
+          col += span;
+        });
+        return maxLines * LINE_H + 2 * HEAD_PAD_V;
+      });
+
+      // Compute cumulative Y for header rows
+      var headRowY = [];
+      var cumY = 0;
+      headRowHeights.forEach(function(rh) { headRowY.push(cumY); cumY += rh; });
+      var totalHeadH = cumY;
+      var totalH = totalHeadH + nBodyRows * BODY_ROW_H;
 
       var SCALE = 2;
       var tblCanvas = document.createElement('canvas');
@@ -1436,7 +1487,8 @@ ui <- fluidPage(
           ctx.lineWidth = opts.borderBottom === 'thick' ? 1.5 : 0.5;
           ctx.beginPath(); ctx.moveTo(x, y + h); ctx.lineTo(x + w, y + h); ctx.stroke();
         }
-        ctx.font = (opts.italic ? 'italic ' : '') + (opts.bold ? 'bold ' : '') + FONT_SZ + 'px Arial,sans-serif';
+        var fontStr = (opts.italic ? 'italic ' : '') + (opts.bold ? 'bold ' : '') + FONT_SZ + 'px Arial,sans-serif';
+        ctx.font = fontStr;
         ctx.fillStyle = opts.color || '#000000';
         var al = opts.align || 'left';
         ctx.textAlign = al === 'right' ? 'right' : (al === 'center' ? 'center' : 'left');
@@ -1444,13 +1496,21 @@ ui <- fluidPage(
         var tx = al === 'right' ? x + w - PAD : (al === 'center' ? x + w / 2 : x + PAD);
         ctx.save();
         ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
-        ctx.fillText(text, tx, y + h / 2);
+        if (opts.wrap) {
+          var lines = measureLines(text, w - 2 * PAD, fontStr);
+          var totalTH = lines.length * LINE_H;
+          var startY = y + (h - totalTH) / 2 + LINE_H / 2;
+          lines.forEach(function(l, li) { ctx.fillText(l, tx, startY + li * LINE_H); });
+        } else {
+          ctx.fillText(text, tx, y + h / 2);
+        }
         ctx.restore();
       }
 
-      // Draw header rows - track rowspan via rsUntil array
-      var rsUntil = new Array(nCols).fill(-1);
-      var yy = 0;
+      // Draw header rows
+      var rsUntil = [];
+      for (var id = 0; id < nCols; id++) rsUntil.push(-1);
+
       headRows.forEach(function(row, ri) {
         var isLast = ri === nHeadRows - 1;
         var col = 0;
@@ -1461,36 +1521,39 @@ ui <- fluidPage(
           var rspan = cell.rs || 1;
           var cw2 = 0;
           for (var k = 0; k < span; k++) { if (col + k < nCols) cw2 += colWidths[col + k]; }
+          var cellH = 0;
+          for (var rr = 0; rr < rspan && ri + rr < nHeadRows; rr++) cellH += headRowHeights[ri + rr];
           var isSpanning = !isLast && span > 1;
-          drawCell(colX[col], cw2, yy, rspan * ROW_H, cell.text, {
-            bg: '#f0f0f0', bold: true, align: 'center',
+          drawCell(colX[col], cw2, headRowY[ri], cellH, cell.text, {
+            bg: '#f0f0f0', bold: true, align: 'center', wrap: true,
             borderBottom: isSpanning ? 'thin' : (isLast ? 'thick' : null)
           });
           for (var k2 = 0; k2 < span; k2++) { if (col + k2 < nCols) rsUntil[col + k2] = ri + rspan - 1; }
           col += span;
         });
-        yy += ROW_H;
       });
 
       // Draw body rows
+      var yy = totalHeadH;
       bodyRows.forEach(function(row) {
         var col = 0;
         row.forEach(function(cell) {
           var span = Math.min(cell.cs || 1, nCols - col);
           var cw2 = 0;
           for (var k = 0; k < span; k++) { if (col + k < nCols) cw2 += colWidths[col + k]; }
-          drawCell(colX[col], cw2, yy, ROW_H, cell.text, {
+          drawCell(colX[col], cw2, yy, BODY_ROW_H, cell.text, {
             bg: cell.bg, bold: cell.bold, italic: cell.italic, color: cell.color, align: cell.align
           });
           col += span;
         });
-        yy += ROW_H;
+        yy += BODY_ROW_H;
       });
 
-      // --- Capture visualization with html2canvas ---
-      html2canvas(vizEl, {
-        scale: 2, useCORS: true, backgroundColor: '#ffffff', scrollX: 0, scrollY: 0
-      }).then(function(vizCanvas) {
+      // Capture visualization via Plotly.toImage for full-width output at any resolution
+      var vizW = 1200;
+      var vizH = 700;
+
+      Plotly.toImage(vizEl, { format: 'png', width: vizW, height: vizH }).then(function(vizDataUrl) {
         var jsPDFCtor = window.jspdf.jsPDF;
         var doc = new jsPDFCtor({ orientation: 'landscape', unit: 'mm', format: 'a3' });
         var pageW = doc.internal.pageSize.getWidth();
@@ -1505,10 +1568,10 @@ ui <- fluidPage(
         doc.addImage(tblCanvas.toDataURL('image/png'), 'PNG', margin + (cW - tW) / 2, margin, tW, tH);
 
         doc.addPage();
-        var vA = vizCanvas.height / vizCanvas.width;
-        var vW = cW; var vH = vW * vA;
-        if (vH > cH) { vH = cH; vW = vH / vA; }
-        doc.addImage(vizCanvas.toDataURL('image/png'), 'PNG', margin + (cW - vW) / 2, margin, vW, vH);
+        var vRatio = vizH / vizW;
+        var vW = cW; var vH = vW * vRatio;
+        if (vH > cH) { vH = cH; vW = vH / vRatio; }
+        doc.addImage(vizDataUrl, 'PNG', margin + (cW - vW) / 2, margin, vW, vH);
 
         doc.save(payload.filename || 'budget.pdf');
       });
@@ -4110,22 +4173,31 @@ server <- function(input, output, session) {
       )
     })
 
-    subplot(plots, nrows = 1, shareY = FALSE, margin = 0.05) %>%
-      config(toImageButtonOptions = list(format = "png", filename = paste0("budget_visualization_", format(Sys.Date(), "%Y%m%d")))) %>%
-      layout(
-        title = list(text = "Cumulative budget over time by category and site", x = 0.5, xanchor = "center"),
-        showlegend = TRUE,
-        legend = list(
-          orientation = "h",
-          x = 0.5,
-          xanchor = "center",
-          y = -0.25,
-          yanchor = "top"
-        ),
-        hovermode = "x unified",
-        margin = list(t = 110, b = 120),
-        annotations = facet_annotations
-      )
+    n_f  <- length(plots)
+    gap  <- 0.05
+    w_each <- (1 - gap * (n_f - 1)) / n_f
+    xaxis_names <- c("xaxis", if (n_f > 1) paste0("xaxis", 2:n_f) else character(0))
+    xaxis_domains <- setNames(
+      lapply(seq_len(n_f), function(i) {
+        start <- (i - 1) * (w_each + gap)
+        list(domain = c(start, start + w_each))
+      }),
+      xaxis_names
+    )
+
+    base_fig <- subplot(plots, nrows = 1, shareY = FALSE, margin = gap) %>%
+      config(toImageButtonOptions = list(format = "png", filename = paste0("budget_visualization_", format(Sys.Date(), "%Y%m%d"))))
+
+    base_layout <- list(
+      title = list(text = "Cumulative budget over time by category and site", x = 0.5, xanchor = "center"),
+      showlegend = TRUE,
+      legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.25, yanchor = "top"),
+      hovermode = "x unified",
+      margin = list(t = 110, b = 120),
+      annotations = facet_annotations
+    )
+
+    do.call(layout, c(list(base_fig), base_layout, xaxis_domains))
   })
 
   observeEvent(input$save_pdf_btn, {
