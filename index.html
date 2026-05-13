@@ -140,7 +140,8 @@ make_empty_posts &lt;- function() {
     function_expr = character(),
     value_vector = list(),
     note = character(),
-    needs_amendment = logical()
+    needs_amendment = logical(),
+    application_status = character()
   )
 }
 
@@ -556,7 +557,8 @@ make_default_templates &lt;- function() {
     values = list(numeric(), numeric(), numeric()),
     duration_years = c(NA_real_, 3, NA_real_),
     is_default = rep(TRUE, 3),
-    is_deleted = rep(FALSE, 3)
+    is_deleted = rep(FALSE, 3),
+    application_status = rep("Applied for", 3)
   )
 }
 
@@ -806,7 +808,7 @@ parse_posts &lt;- function(posts_tbl) {
   required &lt;- c(
     "id", "center", "post_name", "category", "start_date", "end_date",
     "fte", "value_mode", "value_unit", "constant_expr", "function_expr",
-    "value_vector", "note", "needs_amendment"
+    "value_vector", "note", "needs_amendment", "application_status"
   )
 
   if (!all(required %in% names(posts_tbl))) {
@@ -827,6 +829,7 @@ parse_posts &lt;- function(posts_tbl) {
         value_vector = "",
         note = "",
         needs_amendment = FALSE,
+        application_status = "Applied for",
         ""
       )
     }
@@ -840,7 +843,11 @@ parse_posts &lt;- function(posts_tbl) {
       id = as.integer(id),
       needs_amendment = as.logical(needs_amendment),
       value_vector = strsplit(ifelse(is.na(value_vector), "", value_vector), ";", fixed = TRUE),
-      value_vector = map(value_vector, ~ as.numeric(.x[nzchar(.x)]))
+      value_vector = map(value_vector, ~ as.numeric(.x[nzchar(.x)])),
+      application_status = {
+        v &lt;- as.character(application_status)
+        ifelse(is.na(v) | !nzchar(v), "Applied for", v)
+      }
     )
 }
 
@@ -950,7 +957,7 @@ serialize_templates &lt;- function(templates_tbl) {
 }
 
 parse_templates &lt;- function(templates_tbl) {
-  required &lt;- c("id", "name", "category", "center", "mode", "unit", "constant_expr", "function_expr", "fte", "note", "values", "duration_years", "is_default", "is_deleted")
+  required &lt;- c("id", "name", "category", "center", "mode", "unit", "constant_expr", "function_expr", "fte", "note", "values", "duration_years", "is_default", "is_deleted", "application_status")
   if (is.null(templates_tbl) || !nrow(templates_tbl)) {
     return(make_default_templates())
   }
@@ -973,6 +980,7 @@ parse_templates &lt;- function(templates_tbl) {
         duration_years = NA_real_,
         is_default = FALSE,
         is_deleted = FALSE,
+        application_status = "Applied for",
         ""
       )
     }
@@ -998,7 +1006,11 @@ parse_templates &lt;- function(templates_tbl) {
       duration_years = suppressWarnings(as.numeric(duration_years)),
       is_default = as.logical(is_default),
       is_locked = as.logical(is_locked),
-      is_deleted = as.logical(is_deleted)
+      is_deleted = as.logical(is_deleted),
+      application_status = {
+        v &lt;- as.character(application_status)
+        ifelse(is.na(v) | !nzchar(v), "Applied for", v)
+      }
     )
 }
 
@@ -1494,6 +1506,9 @@ ui &lt;- fluidPage(
       radioButtons("value_unit", "Input amount per", choices = c("Month" = "month", "Year" = "year"), selected = "month", inline = TRUE),
       uiOutput("value_inputs_ui"),
       textAreaInput("note", "Note", value = "", rows = 2),
+      selectInput("application_status", "Application status",
+                  choices = c("Applied for", "Applied for elsewhere", "Not applied for", "Funded"),
+                  selected = "Applied for"),
       tags$div(style = "font-size:0.8em;color:#b00020;margin-top:-4px;", "* = required"),
       fluidRow(
         column(12, actionButton("add_or_update", "Add budget post", class = "btn-success", style = "width: 100%;"))
@@ -1778,6 +1793,7 @@ server &lt;- function(input, output, session) {
     updateRadioButtons(session, "value_unit", selected = "month")
     updateTextInput(session, "function_expr", value = "")
     updateTextAreaInput(session, "note", value = "")
+    updateSelectInput(session, "application_status", selected = "Applied for")
     rv$value_inputs_refresh &lt;- rv$value_inputs_refresh + 1L
     refresh_post_field_labels()
   }
@@ -2556,7 +2572,8 @@ server &lt;- function(input, output, session) {
         values         = list(unlist(var_vals)),
         duration_years = dur_years,
         is_default     = FALSE,
-        is_deleted     = FALSE
+        is_deleted     = FALSE,
+        application_status = if (!is.null(input$application_status)) input$application_status else "Applied for"
       )
       rv$template_registry &lt;- bind_rows(rv$template_registry, new_tpl)
       rv$next_template_id &lt;- rv$next_template_id + 1L
@@ -2577,6 +2594,8 @@ server &lt;- function(input, output, session) {
     updateTextInput(session, "function_expr", value = tpl$function_expr)
     updateNumericInput(session, "fte", value = tpl$fte)
     updateTextAreaInput(session, "note", value = tpl$note)
+    updateSelectInput(session, "application_status",
+      selected = if (!is.null(tpl$application_status) &amp;&amp; nzchar(tpl$application_status)) tpl$application_status else "Applied for")
 
     if (!is.na(tpl$duration_years)) {
       updateDateRangeInput(session, "post_date_range", start = input$budget_start, end = input$budget_start %m+% years(as.integer(tpl$duration_years)) - days(1))
@@ -2644,7 +2663,8 @@ server &lt;- function(input, output, session) {
       values         = list(unlist(var_vals)),
       duration_years = dur_years,
       is_default     = prev_default,
-      is_deleted     = FALSE
+      is_deleted     = FALSE,
+      application_status = if (!is.null(input$application_status)) input$application_status else "Applied for"
     )
 
     rv$template_registry &lt;- rv$template_registry %&gt;% filter(id != tpl_id) %&gt;% bind_rows(new_tpl)
@@ -2783,7 +2803,7 @@ server &lt;- function(input, output, session) {
       }
 
       meta &lt;- rv$posts %&gt;%
-        select(id, start_date, end_date, note, needs_amendment)
+        select(id, start_date, end_date, note, needs_amendment, application_status)
 
       out &lt;- long %&gt;%
         left_join(meta, by = "id") %&gt;%
@@ -2803,7 +2823,7 @@ server &lt;- function(input, output, session) {
           Value = value,
           needs_amendment = needs_amendment
         ) %&gt;%
-        select(id, Period, `Post name`, Site, Category, Note, `Start Date`, `End date`, FTE, Value, needs_amendment)
+        select(id, Period, `Post name`, Site, Category, Note, `Start Date`, `End date`, FTE, Value, needs_amendment, application_status)
 
       if (apply_filters) {
         if (!is.null(input$filter_name) &amp;&amp; length(input$filter_name) &gt; 0) {
@@ -2847,6 +2867,7 @@ server &lt;- function(input, output, session) {
           Value = sum(Value),
           needs_amendment = any(needs_amendment, na.rm = TRUE),
           id = min(id),
+          application_status = first(application_status),
           .groups = "drop"
         )
 
@@ -2871,7 +2892,7 @@ server &lt;- function(input, output, session) {
       }
 
       out %&gt;%
-        transmute(id, Period, `Post name`, Site, Category, Note, `Start Date`, `End date`, FTE, Amount = Value, needs_amendment) %&gt;%
+        transmute(id, Period, `Post name`, Site, Category, Note, `Start Date`, `End date`, FTE, Amount = Value, needs_amendment, application_status) %&gt;%
         arrange(Site, `Post name`, Period)
     }
 
@@ -2892,12 +2913,16 @@ server &lt;- function(input, output, session) {
         stateSave = TRUE,
         searching = FALSE,
         scrollX = TRUE,
-        columnDefs = list(list(targets = c(0, 10), visible = FALSE)),
+        columnDefs = list(list(targets = c(0, 10, 11), visible = FALSE)),
         rowCallback = JS(
           "function(row, data) {",
           "  var flagged = data[10];",
           "  if (flagged === true || flagged === 'TRUE' || flagged === 'true') {",
           "    $(row).css('background-color', 'rgba(255, 0, 0, 0.2)');",
+          "  }",
+          "  var status = data[11];",
+          "  if (status &amp;&amp; status !== 'Applied for') {",
+          "    $(row).css({'font-style': 'italic', 'color': '#999'});",
           "  }",
           "}"
         )
@@ -2958,7 +2983,10 @@ server &lt;- function(input, output, session) {
 
   output$post_table_container &lt;- renderUI({
     if (isTRUE(input$display_form == "wide")) {
-      DTOutput("wide_form_table")
+      tagList(
+        uiOutput("wide_total_checkboxes"),
+        DTOutput("wide_form_table")
+      )
     } else {
       DTOutput("posts_table")
     }
@@ -2986,7 +3014,10 @@ server &lt;- function(input, output, session) {
         spacer_cols = character(),
         numeric_cols = character(),
         flagged_post_cols = character(),
-        column_mode = column_mode
+        column_mode = column_mode,
+        post_col_status = character(0),
+        status_total_labels = character(0),
+        grand_total_label = "TOTAL"
       ))
     }
 
@@ -3000,7 +3031,10 @@ server &lt;- function(input, output, session) {
         spacer_cols = character(),
         numeric_cols = character(),
         flagged_post_cols = character(),
-        column_mode = column_mode
+        column_mode = column_mode,
+        post_col_status = character(0),
+        status_total_labels = character(0),
+        grand_total_label = "TOTAL"
       ))
     }
 
@@ -3034,6 +3068,10 @@ server &lt;- function(input, output, session) {
     spacer_cols &lt;- character(0)
     numeric_cols &lt;- character(0)
     flagged_post_cols &lt;- character(0)
+    has_status &lt;- "application_status" %in% names(data_rows)
+    post_col_status &lt;- character(0)   # named: col_name -&gt; application_status
+    site_post_cols &lt;- list()          # named: site -&gt; vector of post col names
+    site_total_col_map &lt;- character(0) # named: site -&gt; site-total col name
 
     for (s_idx in seq_along(sites_vec)) {
       site &lt;- sites_vec[s_idx]
@@ -3056,6 +3094,21 @@ server &lt;- function(input, output, session) {
         }, numeric(1))
         post_cols &lt;- c(post_cols, col_name)
 
+        # Track application status for this column (most common among its data rows)
+        if (has_status) {
+          if (identical(column_mode, "post")) {
+            status_vals &lt;- data_rows$application_status[data_rows$Site == site &amp; data_rows$`Post name` == post]
+          } else {
+            status_vals &lt;- data_rows$application_status[data_rows$Site == site &amp; data_rows$Category_resolved == post]
+          }
+          dominant &lt;- if (length(status_vals) &gt; 0) {
+            names(sort(table(status_vals), decreasing = TRUE))[1]
+          } else {
+            "Applied for"
+          }
+          post_col_status[col_name] &lt;- dominant
+        }
+
         # Mark post columns that contain at least one amendment-required post.
         if (identical(column_mode, "post") &amp;&amp; any(data_rows$Site == site &amp; data_rows$`Post name` == post &amp; data_rows$needs_amendment, na.rm = TRUE)) {
           flagged_post_cols &lt;- c(flagged_post_cols, col_name)
@@ -3063,6 +3116,7 @@ server &lt;- function(input, output, session) {
       }
 
       numeric_cols &lt;- c(numeric_cols, post_cols)
+      site_post_cols[[site]] &lt;- post_cols
 
       if (isTRUE(include_site_totals)) {
         total_col &lt;- paste(site, "Site total", sep = " &gt; ")
@@ -3071,6 +3125,7 @@ server &lt;- function(input, output, session) {
         post_sums &lt;- rowSums(post_mat, na.rm = TRUE)
         wide_df[[total_col]] &lt;- ifelse(post_counts == 0, NA_real_, post_sums)
         numeric_cols &lt;- c(numeric_cols, total_col)
+        site_total_col_map[site] &lt;- total_col
       }
 
       if (s_idx &lt; length(sites_vec)) {
@@ -3100,6 +3155,7 @@ server &lt;- function(input, output, session) {
     }
     numeric_cols &lt;- c(numeric_cols, grand_total_col)
 
+    # Build grand total row (sum across period rows only)
     total_row &lt;- as.list(rep(NA, ncol(wide_df)))
     names(total_row) &lt;- names(wide_df)
     total_row$Period &lt;- "TOTAL"
@@ -3110,6 +3166,83 @@ server &lt;- function(input, output, session) {
       total_row[[nm]] &lt;- ""
     }
 
+    # Build per-application-status total rows (only for statuses present in data)
+    status_total_labels &lt;- character(0)
+    grand_total_label &lt;- "TOTAL"
+    if (has_status &amp;&amp; length(post_col_status) &gt; 0) {
+      status_order &lt;- c("Applied for", "Applied for elsewhere", "Not applied for", "Funded")
+      statuses_present &lt;- intersect(status_order, unique(post_col_status))
+
+      if (length(statuses_present) == 1) {
+        # Single status: just use one "Total" row, no separator
+        total_row$Period &lt;- "Total"
+        grand_total_label &lt;- "Total"
+      } else if (length(statuses_present) &gt; 1) {
+        # Multiple statuses: separator row + per-status rows
+        # Insert a blank separator row before the totals block
+        sep_row &lt;- as.list(rep(NA, ncol(wide_df)))
+        names(sep_row) &lt;- names(wide_df)
+        sep_row$Period &lt;- "Totals"
+        for (nm in spacer_cols) sep_row[[nm]] &lt;- ""
+        wide_df &lt;- bind_rows(wide_df, as_tibble(sep_row))
+        status_total_labels &lt;- c(status_total_labels, "Totals")
+      }
+
+      for (status in if (length(statuses_present) &gt; 1) statuses_present else character(0)) {
+        status_cols &lt;- names(post_col_status)[post_col_status == status]
+        st_row &lt;- as.list(rep(NA, ncol(wide_df)))
+        names(st_row) &lt;- names(wide_df)
+        label &lt;- status
+        st_row$Period &lt;- label
+        status_total_labels &lt;- c(status_total_labels, label)
+
+        for (nm in spacer_cols) st_row[[nm]] &lt;- ""
+
+        # Per-site: sum post cols of this status
+        for (site in sites_vec) {
+          site_cols_for_status &lt;- intersect(site_post_cols[[site]], status_cols)
+          if (length(site_cols_for_status) &gt; 0) {
+            site_data &lt;- data_rows %&gt;% filter(
+              Site == site,
+              application_status == status
+            )
+            for (cn in site_cols_for_status) {
+              post_label &lt;- sub(paste0("^", site, " &gt; "), "", cn)
+              if (identical(column_mode, "post")) {
+                v &lt;- sum(site_data[[amount_col]][site_data$`Post name` == post_label], na.rm = TRUE)
+              } else {
+                v &lt;- sum(site_data[[amount_col]][site_data$Category_resolved == post_label], na.rm = TRUE)
+              }
+              st_row[[cn]] &lt;- v
+            }
+            # Other post cols in this site: leave NA
+          }
+          if (isTRUE(include_site_totals) &amp;&amp; site %in% names(site_total_col_map)) {
+            site_vals &lt;- vapply(site_cols_for_status, function(cn) {
+              v &lt;- st_row[[cn]]; if (is.null(v) || is.na(v)) 0 else v
+            }, numeric(1))
+            st_row[[site_total_col_map[site]]] &lt;- if (length(site_vals) &gt; 0) sum(site_vals) else NA_real_
+          }
+        }
+
+        # Grand total for this status
+        if (isTRUE(include_site_totals)) {
+          site_tot_vals &lt;- vapply(sites_vec, function(s) {
+            v &lt;- st_row[[site_total_col_map[s]]]; if (is.null(v) || is.na(v)) 0 else v
+          }, numeric(1))
+          st_row[[grand_total_col]] &lt;- sum(site_tot_vals)
+        } else {
+          all_vals &lt;- vapply(status_cols, function(cn) {
+            v &lt;- st_row[[cn]]; if (is.null(v) || is.na(v)) 0 else v
+          }, numeric(1))
+          st_row[[grand_total_col]] &lt;- sum(all_vals)
+        }
+
+        wide_df &lt;- bind_rows(wide_df, as_tibble(st_row))
+      }
+    }
+
+    # Append grand total row last
     wide_df &lt;- bind_rows(wide_df, as_tibble(total_row))
 
     list(
@@ -3119,9 +3252,39 @@ server &lt;- function(input, output, session) {
       spacer_cols = spacer_cols,
       numeric_cols = numeric_cols,
       flagged_post_cols = unique(flagged_post_cols),
-      column_mode = column_mode
+      column_mode = column_mode,
+      post_col_status = post_col_status,
+      status_total_labels = status_total_labels,
+      grand_total_label = grand_total_label
     )
   }
+
+  output$wide_total_checkboxes &lt;- renderUI({
+    req(input$display_form == "wide")
+    long_data &lt;- filtered_posts()
+    if (!nrow(long_data)) return(NULL)
+    if (!"application_status" %in% names(long_data)) return(NULL)
+
+    status_order &lt;- c("Applied for", "Applied for elsewhere", "Not applied for", "Funded")
+    statuses_present &lt;- intersect(status_order, unique(long_data$application_status))
+    if (length(statuses_present) &lt;= 1) return(NULL)
+
+    status_labels &lt;- statuses_present
+    all_labels &lt;- c(status_labels, "TOTAL")
+    display_names &lt;- c(statuses_present, "Grand total")
+    choices_vec &lt;- setNames(all_labels, display_names)
+
+    tags$div(
+      style = "padding: 4px 0 6px;",
+      checkboxGroupInput(
+        "wide_totals_visible",
+        "Show total rows:",
+        choices = choices_vec,
+        selected = choices_vec,
+        inline = TRUE
+      )
+    )
+  })
 
   output$wide_form_table &lt;- renderDT({
     req(input$display_form == "wide")
@@ -3145,6 +3308,22 @@ server &lt;- function(input, output, session) {
     wide_df &lt;- wide_obj$data
     numeric_cols &lt;- wide_obj$numeric_cols
     flagged_post_cols &lt;- wide_obj$flagged_post_cols
+
+    # Filter total rows based on checkbox selection
+    grand_total_label &lt;- wide_obj$grand_total_label
+    all_total_labels &lt;- c(wide_obj$status_total_labels, grand_total_label)
+    vis_totals &lt;- if (is.null(input$wide_totals_visible)) all_total_labels else input$wide_totals_visible
+    # "Totals" separator is not user-toggleable; exclude it from setdiff computation
+    toggleable_labels &lt;- setdiff(all_total_labels, "Totals")
+    hide_labels &lt;- setdiff(toggleable_labels, vis_totals)
+    # Also hide "Totals" separator when all status rows are hidden
+    status_data_labels &lt;- setdiff(wide_obj$status_total_labels, "Totals")
+    if (length(status_data_labels) &gt; 0 &amp;&amp; !any(status_data_labels %in% vis_totals)) {
+      hide_labels &lt;- union(hide_labels, "Totals")
+    }
+    if (length(hide_labels) &gt; 0) {
+      wide_df &lt;- wide_df %&gt;% filter(!(Period %in% hide_labels))
+    }
 
     site_counts &lt;- tibble(
       Site = wide_obj$sites,
@@ -3225,8 +3404,20 @@ server &lt;- function(input, output, session) {
         ),
         rowCallback = JS(
           "function(row, data) {",
-          "  if (data[0] === 'TOTAL') {",
+          "  var p = data[0];",
+          "  var statusRows = ['Applied for', 'Applied for elsewhere', 'Not applied for', 'Funded'];",
+          "  var isStatusRow = statusRows.indexOf(p) !== -1;",
+          "  var isTotalRow  = (p === 'TOTAL' || p === 'Total');",
+          "  var isSepRow    = (p === 'Totals');",
+          "  if (isTotalRow) {",
           "    $(row).css({'font-weight':'700','background-color':'#f1f1f1'});",
+          "  } else if (isSepRow) {",
+          "    $(row).css({'font-weight':'700','background-color':'#ececec','color':'#555'});",
+          "    $('td', row).each(function(i) { if (i &gt; 0) $(this).text(''); });",
+          "  } else if (p === 'Applied for') {",
+          "    $(row).css({'font-weight':'700','background-color':'#f1f1f1'});",
+          "  } else if (isStatusRow) {",
+          "    $(row).css({'font-weight':'700','font-style':'italic','color':'#888','background-color':'#f8f8f8'});",
           "  }",
           "}"
         )
@@ -3242,6 +3433,40 @@ server &lt;- function(input, output, session) {
         columns = flagged_post_cols,
         backgroundColor = "rgba(255, 0, 0, 0.2)"
       )
+    }
+
+    # Grey/italic formatting for non-"Applied for" post columns in wide view
+    # Applied only to data rows (not total/separator rows) via rowCallback cell override.
+    post_col_status &lt;- wide_obj$post_col_status
+    if (length(post_col_status) &gt; 0) {
+      non_applied_cols &lt;- names(post_col_status)[post_col_status != "Applied for"]
+      non_applied_cols &lt;- intersect(non_applied_cols, names(wide_df))
+      if (length(non_applied_cols) &gt; 0) {
+        # Get 0-based column indices for non-applied columns
+        non_applied_idx &lt;- which(names(wide_df) %in% non_applied_cols) - 1L
+        idx_json &lt;- paste0("[", paste(non_applied_idx, collapse = ","), "]")
+        dt &lt;- dt %&gt;% htmlwidgets::onRender(paste0(
+          "function(el, x) {",
+          "  var api = $(el).find('table').DataTable();",
+          "  var grayIdx = ", idx_json, ";",
+          "  var statusRows = ['Applied for', 'Applied for elsewhere', 'Not applied for', 'Funded', 'Totals', 'TOTAL', 'Total'];",
+          "  api.on('draw', function() {",
+          "    api.rows().every(function() {",
+          "      var d = this.data();",
+          "      var p = d[0];",
+          "      var isTotalRow = statusRows.indexOf(p) !== -1;",
+          "      if (!isTotalRow) {",
+          "        var rowNode = this.node();",
+          "        grayIdx.forEach(function(ci) {",
+          "          var cell = api.cell(rowNode, ci).node();",
+          "          if (cell) $(cell).css({'color':'#999','font-style':'italic'});",
+          "        });",
+          "      }",
+          "    });",
+          "  }).draw();",
+          "}"
+        ))
+      }
     }
 
     dt
@@ -3330,6 +3555,8 @@ server &lt;- function(input, output, session) {
     updateRadioButtons(session, "value_unit", selected = row$value_unit)
     updateTextInput(session, "function_expr", value = row$function_expr)
     updateTextAreaInput(session, "note", value = row$note)
+    updateSelectInput(session, "application_status",
+      selected = if (!is.null(row$application_status) &amp;&amp; nzchar(row$application_status)) row$application_status else "Applied for")
 
     amend_fields &lt;- get_post_amendment_fields(
       post_row = row,
@@ -3444,7 +3671,8 @@ server &lt;- function(input, output, session) {
       function_expr = ifelse(is.null(input$function_expr), rv$function_expr_draft, input$function_expr),
       value_vector = list(vec),
       note = input$note,
-      needs_amendment = FALSE
+      needs_amendment = FALSE,
+      application_status = if (!is.null(input$application_status)) input$application_status else "Applied for"
     )
 
     dup &lt;- rv$posts %&gt;%
