@@ -509,7 +509,7 @@ get_post_amendment_fields <- function(post_row, budget_start, budget_end, catego
   unique(fields)
 }
 
-resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflation_pct = 0, fte_monthly_total = NULL, salaries_tbl = NULL, budget_start = NULL) {
+resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflation_pct = 0, fte_monthly_total = NULL, salaries_tbl = NULL, budget_start = NULL, all_posts_tbl = NULL) {
   months <- month_sequence(post_row$start_date, post_row$end_date)
   n_months <- length(months)
   n_years <- ceiling(n_months / 12)
@@ -517,6 +517,7 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
   mode <- post_row$value_mode
   unit <- post_row$value_unit
   fte <- post_row$fte
+  current_site <- post_row$center
   inflation_rate <- as.numeric(inflation_pct) / 100
   if (is.na(inflation_rate)) inflation_rate <- 0
   # Use budget start year as the reference year (multiplier 1.0) so that posts
@@ -536,6 +537,32 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
     sum(fte_monthly_total[idx_start:idx_end], na.rm = TRUE)
   }, numeric(1))
 
+  # Helper to compute FTE vectors for a given site or vector of sites
+  get_site_fte <- function(sites) {
+    if (is.null(all_posts_tbl) || !nrow(all_posts_tbl)) {
+      return(rep(NA_real_, n_years))
+    }
+    
+    sites <- as.character(sites)
+    site_posts <- all_posts_tbl[all_posts_tbl$center %in% sites, ]
+    
+    monthly <- map_dbl(months, function(m) {
+      sum(site_posts$fte[site_posts$start_date <= m & site_posts$end_date >= m], na.rm = TRUE) / 12
+    })
+    
+    vapply(seq_len(n_years), function(i) {
+      idx_start <- (i - 1) * 12 + 1
+      idx_end <- min(i * 12, n_months)
+      sum(monthly[idx_start:idx_end], na.rm = TRUE)
+    }, numeric(1))
+  }
+
+  all_sites <- if (!is.null(all_posts_tbl) && nrow(all_posts_tbl) > 0) {
+    unique(as.character(all_posts_tbl$center))
+  } else {
+    character(0)
+  }
+
   # Issue #4: Generate salary objects for identifier$total_m access
   salary_objs <- list()
   if (!is.null(salaries_tbl) && nrow(salaries_tbl) > 0) {
@@ -544,25 +571,25 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
   
   salary_ids <- rownames(salaries_lookup)
   extra_env <- list(
-    salaries = salaries_lookup,
     inflation_pct = as.numeric(inflation_pct),
-    months = months,
-    FTE_monthly_all = fte_monthly_total,
-    FTE_all = fte_yearly_total,
-    FTE_total = sum(fte_monthly_total, na.rm = TRUE),
-    FTE_monthly = if (!is.na(fte)) fte / 12 else NA_real_,
-    inflation_month_factors = inflation_month_factors,
-    inflation_year_factors = inflation_year_factors,
-    apply_inflation_month = function(base_value) {
-      x2 <- rep(as.numeric(base_value), length.out = n_months)
-      x2 * inflation_month_factors
+    this_site = current_site,
+    all_sites = all_sites,
+    fte = function(site = current_site) {
+      get_site_fte(site)
     },
-    apply_inflation_year = function(base_value) {
-      x2 <- rep(as.numeric(base_value), length.out = n_years)
-      x2 * inflation_year_factors
+    inflation_factors = if (unit == "year") inflation_year_factors else inflation_month_factors,
+    apply_inflation = function(base_value) {
+      if (unit == "year") {
+        x2 <- rep(as.numeric(base_value), length.out = n_years)
+        x2 * inflation_year_factors
+      } else {
+        x2 <- rep(as.numeric(base_value), length.out = n_months)
+        x2 * inflation_month_factors
+      }
     }
   )
   
+  # Inject salary objects for new syntax (issue #4)
   # Inject salary objects for new syntax (issue #4)
   if (length(salary_objs) > 0) {
     for (sid in names(salary_objs)) {
@@ -656,7 +683,8 @@ build_long_budget <- function(posts_tbl, budget_start, budget_end, salaries_look
         inflation_pct = inflation_pct,
         fte_monthly_total = row_fte_monthly_total,
         salaries_tbl = salaries_tbl,
-        budget_start = budget_start
+        budget_start = budget_start,
+        all_posts_tbl = posts_tbl
       ),
       error = function(e) NULL
     )
@@ -694,7 +722,8 @@ post_total <- function(post_row, all_posts_tbl = post_row, salaries_lookup = dat
     inflation_pct = inflation_pct,
     fte_monthly_total = row_fte_monthly_total,
     salaries_tbl = salaries_tbl,
-    budget_start = budget_start
+    budget_start = budget_start,
+    all_posts_tbl = all_posts_tbl
   )
   sum(resolved$value)
 }
@@ -2843,7 +2872,7 @@ server <- function(input, output, session) {
 
     if (mode == "function") {
       tagList(
-        textInput("function_expr", "Formula expression", value = isolate(rv$function_expr_draft), placeholder = "Expression using n, FTE, FTE_monthly_all/FTE_all/FTE_total, salary_identifier$total_m and inflation helpers"),
+        textInput("function_expr", "Formula expression", value = isolate(rv$function_expr_draft), placeholder = "Expression using n, FTE, fte(site), salary_identifier$total_m and apply_inflation() helper"),
         actionButton("show_formula_help", "Help: available formula variables")
       )
     } else {
@@ -3863,7 +3892,8 @@ server <- function(input, output, session) {
         inflation_pct = input$inflation_pct,
         fte_monthly_total = row_fte_monthly_total,
         salaries_tbl = rv$salaries,
-        budget_start = as.Date(input$budget_start)
+        budget_start = as.Date(input$budget_start),
+        all_posts_tbl = candidate_posts
       )
       category_msg <- validate_category_rule(
         resolved_values = resolved_for_validation,
@@ -4225,17 +4255,13 @@ server <- function(input, output, session) {
       tags$p("Available in amount formulas (Formula mode):"),
       tags$ul(
         tags$li(tags$b("n"), " - required vector length for the selected input period (months or years)"),
-        tags$li(tags$b("months"), " - month vector for current post date range"),
-        tags$li(tags$b("FTE"), " - FTE per year as input by user"),
-        tags$li(tags$b("FTE_monthly"), " - FTE of this post per month (FTE / 12)"),
-        tags$li(tags$b("FTE_all"), " - year vector (post-year buckets) of summed yearly FTE across all posts"),
-        tags$li(tags$b("FTE_monthly_all"), " - vector of summed monthly FTE (yearly FTE / 12) across all posts for each month in the current post range"),
-        tags$li(tags$b("FTE_total"), " - scalar sum of all period-wise FTEs across all posts (sum of FTE_monthly_all)"),
+        tags$li(tags$b("FTE"), " - FTE per year for this post, as input by user"),
+        tags$li(tags$b("fte(site)"), " - function returning total number of FTEs within each chosen period (month, year). By default sums across all positions within the current post's site, but this can be changed with the site argument; e.g., fte(site = 'Main'), fte(site = all_sites)."),
+        tags$li(tags$b("this_site"), " - string, the current post's site name"),
+        tags$li(tags$b("all_sites"), " - vector of all site names in the budget"),
+        tags$li(tags$b("inflation_factors"), " - vector of inflation multipliers for each period (month or year, depending on post's period type)"),
+        tags$li(tags$b("apply_inflation(base_value)"), " - applies calendar-year inflation to a repeated value, matching the post's period type (returns month or year length vector)"),
         tags$li(tags$b("inflation_pct"), " - yearly inflation percentage"),
-        tags$li(tags$b("inflation_month_factors"), " - month-wise multipliers based on calendar year relative to the first selected month"),
-        tags$li(tags$b("inflation_year_factors"), " - year-wise multipliers"),
-        tags$li(tags$b("apply_inflation_month(base_value)"), " - returns a month-length vector for the current post range with calendar-year inflation applied"),
-        tags$li(tags$b("apply_inflation_year(base_value)"), " - returns a year-length vector with yearly inflation applied")
       ),
       tags$p("Salary references:"),
       tags$ul(
@@ -4244,8 +4270,7 @@ server <- function(input, output, session) {
         tags$li("Monthly selectors: base_m, pension_m, own_pension_m, holiday_base_m, holiday_m, total_plus_holiday_m, total_m"),
         tags$li("Yearly selectors: total_plus_holiday_y, total_y"),
         tags$li(tags$b("total_m / total_y"), " — the final effective salary (holiday-absence deducted if 'Subtract holiday' is on)"),
-        tags$li(tags$b("total_plus_holiday_m / total_plus_holiday_y"), " — salary including holiday allowance but before holiday-absence deduction"),
-        tags$li("Legacy lookup object salaries[identifier, \"total_m\"] remains available for older formulas")
+        tags$li(tags$b("total_plus_holiday_m / total_plus_holiday_y"), " — salary including holiday allowance but before holiday-absence deduction")
       ),
       tags$p("Examples:"),
       tags$pre("apply_inflation_month(phd_student$total_m)\nresearch_year$total_plus_holiday_m\nclinical_researcher$total_y")
