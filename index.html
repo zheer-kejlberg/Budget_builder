@@ -1534,7 +1534,7 @@ ui &lt;- fluidPage(
               5,
               checkboxGroupInput(
                 "squash_dims",
-                "Collapse by:",
+                "Collapse:",
                 choices = c("Period", "Post name", "Site", "Category"),
                 selected = character(0),
                 inline = TRUE
@@ -1556,13 +1556,15 @@ ui &lt;- fluidPage(
             column(3, selectizeInput("filter_name", "Post name", choices = character(0), multiple = TRUE)),
             column(3, selectizeInput("filter_center", "Site", choices = character(0), multiple = TRUE)),
             column(3, selectizeInput("filter_category", "Category", choices = character(0), multiple = TRUE)),
-            column(3, dateRangeInput("filter_month_range", "Active month range (inclusive)", start = start_default, end = end_default, format = "yyyy-mm"))
+            column(3, selectizeInput("filter_status", "Application status", choices = c("Applied for", "Applied for elsewhere", "Not applied for", "Funded"), selected = character(0), multiple = TRUE))
           ),
           fluidRow(
             column(3, numericInput("filter_amount_min", "Min amount", value = 0)),
             column(3, numericInput("filter_amount_max", "Max amount", value = 50000000)),
-            column(6, textInput("filter_text", "Free-text search", value = "", placeholder = "Search in period, post name, site, category"))
+            column(3, textInput("filter_text", "Free-text search", value = "", placeholder = "Search in period, post name, site, category")),
+            column(3, dateRangeInput("filter_month_range", "Period (inclusive)", start = start_default, end = end_default, format = "yyyy-mm"))
           ),
+
           fluidRow(
             tags$div(
               style = "display: flex; justify-content: flex-end; padding: 10px 15px 0;",
@@ -2835,6 +2837,9 @@ server &lt;- function(input, output, session) {
         if (!is.null(input$filter_category) &amp;&amp; length(input$filter_category) &gt; 0) {
           out &lt;- out %&gt;% filter(Category %in% input$filter_category)
         }
+        if (!is.null(input$filter_status) &amp;&amp; length(input$filter_status) &gt; 0) {
+          out &lt;- out %&gt;% filter(application_status %in% input$filter_status)
+        }
       }
 
       squash &lt;- input$squash_dims
@@ -3270,9 +3275,8 @@ server &lt;- function(input, output, session) {
     if (length(statuses_present) &lt;= 1) return(NULL)
 
     status_labels &lt;- statuses_present
-    all_labels &lt;- c(status_labels, "TOTAL")
-    display_names &lt;- c(statuses_present, "Grand total")
-    choices_vec &lt;- setNames(all_labels, display_names)
+    all_labels &lt;- status_labels
+    choices_vec &lt;- setNames(all_labels, statuses_present)
 
     tags$div(
       style = "padding: 4px 0 6px;",
@@ -3313,8 +3317,8 @@ server &lt;- function(input, output, session) {
     grand_total_label &lt;- wide_obj$grand_total_label
     all_total_labels &lt;- c(wide_obj$status_total_labels, grand_total_label)
     vis_totals &lt;- if (is.null(input$wide_totals_visible)) all_total_labels else input$wide_totals_visible
-    # "Totals" separator is not user-toggleable; exclude it from setdiff computation
-    toggleable_labels &lt;- setdiff(all_total_labels, "Totals")
+    # "Totals" separator and grand total are never user-toggleable
+    toggleable_labels &lt;- setdiff(all_total_labels, c("Totals", grand_total_label))
     hide_labels &lt;- setdiff(toggleable_labels, vis_totals)
     # Also hide "Totals" separator when all status rows are hidden
     status_data_labels &lt;- setdiff(wide_obj$status_total_labels, "Totals")
@@ -3528,7 +3532,7 @@ server &lt;- function(input, output, session) {
         rv$form_error_at &lt;- NULL
         later::later(function() {
           if (identical(wide_mode, "category")) {
-            rv$form_error_text &lt;- "Category columns in Wide view are aggregated and cannot be edited. Uncheck 'Collapse by category' and select a specific post column."
+            rv$form_error_text &lt;- "Category columns in Wide view are aggregated and cannot be edited. Uncheck 'Collapse: category' and select a specific post column."
           } else {
             rv$form_error_text &lt;- "Select a specific post column in Wide view to edit. Site/grand total columns are not editable."
           }
@@ -3581,7 +3585,7 @@ server &lt;- function(input, output, session) {
         rv$form_error_at &lt;- NULL
         later::later(function() {
           if (identical(wide_mode, "category")) {
-            rv$form_error_text &lt;- "Category columns in Wide view are aggregated and cannot be deleted. Uncheck 'Collapse by category' and select a specific post column."
+            rv$form_error_text &lt;- "Category columns in Wide view are aggregated and cannot be deleted. Uncheck 'Collapse: category' and select a specific post column."
           } else {
             rv$form_error_text &lt;- "Select a specific post column in Wide view to delete. Site/grand total columns are not deletable."
           }
@@ -3602,7 +3606,7 @@ server &lt;- function(input, output, session) {
         rv$form_error_at &lt;- NULL
         later::later(function() {
           if (identical(wide_mode, "category")) {
-            rv$form_error_text &lt;- "Category columns in Wide view are aggregated and cannot be made inactive. Uncheck 'Collapse by category' and select a specific post column."
+            rv$form_error_text &lt;- "Category columns in Wide view are aggregated and cannot be made inactive. Uncheck 'Collapse: category' and select a specific post column."
           } else {
             rv$form_error_text &lt;- "Select a specific post column in Wide view to make inactive. Site/grand total columns are not selectable."
           }
