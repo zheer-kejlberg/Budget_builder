@@ -1285,6 +1285,8 @@ ui &lt;- fluidPage(
     "
   ))),
   tags$head(tags$script(src = "https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js")),
+  tags$head(tags$script(src = "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js")),
+  tags$head(tags$script(src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js")),
   tags$head(tags$script(HTML(
     "
     Shiny.addCustomMessageHandler('download-xlsx', function(payload) {
@@ -1437,6 +1439,172 @@ ui &lt;- fluidPage(
     });
 
     
+    "
+  ))),
+  tags$head(tags$script(HTML(
+    "
+    Shiny.addCustomMessageHandler('save-pdf', function(payload) {
+      if (typeof window.jspdf === 'undefined') { console.error('jsPDF not loaded'); return; }
+      if (typeof html2canvas === 'undefined') { console.error('html2canvas not loaded'); return; }
+
+      var vizEl = document.getElementById('visualization_plot');
+      var dtWrapper = document.querySelector('#wide_form_table .dataTables_wrapper');
+      if (!dtWrapper || !vizEl) { console.warn('Elements not found'); return; }
+
+      var headTable = dtWrapper.querySelector('.dataTables_scrollHead table.dataTable');
+      var bodyTable = dtWrapper.querySelector('.dataTables_scrollBody table.dataTable');
+      if (!headTable) headTable = dtWrapper.querySelector('table.dataTable');
+      if (!bodyTable) bodyTable = headTable;
+
+      // --- Draw table directly to canvas (no DOM capture = no viewport clipping) ---
+      var firstBodyRow = bodyTable ? bodyTable.querySelector('tbody tr') : null;
+      if (!firstBodyRow) { console.warn('No body rows'); return; }
+
+      var colWidths = Array.from(firstBodyRow.cells).map(function(c) {
+        return Math.ceil(c.getBoundingClientRect().width) || 60;
+      });
+      var nCols = colWidths.length;
+      var totalW = colWidths.reduce(function(a, b) { return a + b; }, 0);
+      var colX = [];
+      var cx = 0;
+      for (var i = 0; i &lt; nCols; i++) { colX.push(cx); cx += colWidths[i]; }
+
+      var ROW_H = 22;
+      var FONT_SZ = 10;
+      var PAD = 5;
+
+      // Collect header rows
+      var headRows = [];
+      var theadEl = headTable ? headTable.querySelector('thead') : null;
+      if (theadEl) {
+        Array.from(theadEl.rows).forEach(function(tr) {
+          headRows.push(Array.from(tr.cells).map(function(th) {
+            return { text: (th.innerText || th.textContent || '').trim(), cs: th.colSpan || 1, rs: th.rowSpan || 1 };
+          }));
+        });
+      }
+      var nHeadRows = headRows.length;
+
+      // Collect body rows with computed styles
+      var bodyRows = [];
+      var tbodyEl = bodyTable ? bodyTable.querySelector('tbody') : null;
+      if (tbodyEl) {
+        Array.from(tbodyEl.rows).forEach(function(tr) {
+          var rBg = window.getComputedStyle(tr).backgroundColor;
+          bodyRows.push(Array.from(tr.cells).map(function(td) {
+            var cs = window.getComputedStyle(td);
+            var bg = cs.backgroundColor;
+            if (bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent') bg = rBg;
+            if (bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent') bg = 'rgb(255,255,255)';
+            return {
+              text: (td.innerText || td.textContent || '').trim(),
+              cs: td.colSpan || 1,
+              bg: bg,
+              bold: (parseInt(cs.fontWeight, 10) || 400) &gt;= 600,
+              italic: cs.fontStyle === 'italic',
+              color: cs.color || 'rgb(0,0,0)',
+              align: cs.textAlign || 'left'
+            };
+          }));
+        });
+      }
+      var nBodyRows = bodyRows.length;
+      var totalH = (nHeadRows + nBodyRows) * ROW_H;
+
+      var SCALE = 2;
+      var tblCanvas = document.createElement('canvas');
+      tblCanvas.width = totalW * SCALE;
+      tblCanvas.height = totalH * SCALE;
+      var ctx = tblCanvas.getContext('2d');
+      ctx.scale(SCALE, SCALE);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, totalW, totalH);
+
+      function drawCell(x, w, y, h, text, opts) {
+        ctx.fillStyle = opts.bg || '#ffffff';
+        ctx.fillRect(x, y, w, h);
+        if (opts.borderBottom) {
+          ctx.strokeStyle = opts.borderBottom === 'thick' ? '#888888' : '#bbbbbb';
+          ctx.lineWidth = opts.borderBottom === 'thick' ? 1.5 : 0.5;
+          ctx.beginPath(); ctx.moveTo(x, y + h); ctx.lineTo(x + w, y + h); ctx.stroke();
+        }
+        ctx.font = (opts.italic ? 'italic ' : '') + (opts.bold ? 'bold ' : '') + FONT_SZ + 'px Arial,sans-serif';
+        ctx.fillStyle = opts.color || '#000000';
+        var al = opts.align || 'left';
+        ctx.textAlign = al === 'right' ? 'right' : (al === 'center' ? 'center' : 'left');
+        ctx.textBaseline = 'middle';
+        var tx = al === 'right' ? x + w - PAD : (al === 'center' ? x + w / 2 : x + PAD);
+        ctx.save();
+        ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+        ctx.fillText(text, tx, y + h / 2);
+        ctx.restore();
+      }
+
+      // Draw header rows - track rowspan via rsUntil array
+      var rsUntil = new Array(nCols).fill(-1);
+      var yy = 0;
+      headRows.forEach(function(row, ri) {
+        var isLast = ri === nHeadRows - 1;
+        var col = 0;
+        row.forEach(function(cell) {
+          while (col &lt; nCols &amp;&amp; rsUntil[col] &gt;= ri) col++;
+          if (col &gt;= nCols) return;
+          var span = Math.min(cell.cs || 1, nCols - col);
+          var rspan = cell.rs || 1;
+          var cw2 = 0;
+          for (var k = 0; k &lt; span; k++) { if (col + k &lt; nCols) cw2 += colWidths[col + k]; }
+          var isSpanning = !isLast &amp;&amp; span &gt; 1;
+          drawCell(colX[col], cw2, yy, rspan * ROW_H, cell.text, {
+            bg: '#f0f0f0', bold: true, align: 'center',
+            borderBottom: isSpanning ? 'thin' : (isLast ? 'thick' : null)
+          });
+          for (var k2 = 0; k2 &lt; span; k2++) { if (col + k2 &lt; nCols) rsUntil[col + k2] = ri + rspan - 1; }
+          col += span;
+        });
+        yy += ROW_H;
+      });
+
+      // Draw body rows
+      bodyRows.forEach(function(row) {
+        var col = 0;
+        row.forEach(function(cell) {
+          var span = Math.min(cell.cs || 1, nCols - col);
+          var cw2 = 0;
+          for (var k = 0; k &lt; span; k++) { if (col + k &lt; nCols) cw2 += colWidths[col + k]; }
+          drawCell(colX[col], cw2, yy, ROW_H, cell.text, {
+            bg: cell.bg, bold: cell.bold, italic: cell.italic, color: cell.color, align: cell.align
+          });
+          col += span;
+        });
+        yy += ROW_H;
+      });
+
+      // --- Capture visualization with html2canvas ---
+      html2canvas(vizEl, {
+        scale: 2, useCORS: true, backgroundColor: '#ffffff', scrollX: 0, scrollY: 0
+      }).then(function(vizCanvas) {
+        var jsPDFCtor = window.jspdf.jsPDF;
+        var doc = new jsPDFCtor({ orientation: 'landscape', unit: 'mm', format: 'a3' });
+        var pageW = doc.internal.pageSize.getWidth();
+        var pageH = doc.internal.pageSize.getHeight();
+        var margin = 10;
+        var cW = pageW - 2 * margin;
+        var cH = pageH - 2 * margin;
+
+        var tA = tblCanvas.height / tblCanvas.width;
+        var tW = cW; var tH = tW * tA;
+        if (tH &gt; cH) { tH = cH; tW = tH / tA; }
+        doc.addImage(tblCanvas.toDataURL('image/png'), 'PNG', margin + (cW - tW) / 2, margin, tW, tH);
+
+        doc.addPage();
+        var vA = vizCanvas.height / vizCanvas.width;
+        var vW = cW; var vH = vW * vA;
+        if (vH &gt; cH) { vH = cH; vW = vH / vA; }
+        doc.addImage(vizCanvas.toDataURL('image/png'), 'PNG', margin + (cW - vW) / 2, margin, vW, vH);
+
+        doc.save(payload.filename || 'budget.pdf');
+      });
+    });
     "
   ))),
   # Issue #5: Restructured header layout
@@ -2939,8 +3107,13 @@ server &lt;- function(input, output, session) {
   output$visualization_section &lt;- renderUI({
     if (nrow(rv$posts) == 0) return(NULL)
     tagList(
-      h4("Visualization"),
-      plotlyOutput("visualization_plot", height = "600px")
+      tags$div(
+        style = "display: flex; justify-content: space-between; align-items: baseline;",
+        h4("Visualization"),
+        if (isTRUE(input$display_form == "wide"))
+          actionButton("save_pdf_btn", "Save PDF", class = "btn-default btn-sm", icon = icon("file-pdf"))
+      ),
+      plotlyOutput("visualization_plot", height = "600px", width = "100%")
     )
   })
 
@@ -3840,6 +4013,11 @@ server &lt;- function(input, output, session) {
       long_df &lt;- long_df %&gt;% filter(category %in% input$filter_category)
     }
 
+    if (!is.null(input$filter_status) &amp;&amp; length(input$filter_status) &gt; 0) {
+      status_ids &lt;- rv$posts %&gt;% filter(application_status %in% input$filter_status) %&gt;% pull(id)
+      long_df &lt;- long_df %&gt;% filter(id %in% status_ids)
+    }
+
     if (!nrow(long_df)) {
       return(tibble(
         month = as.Date(character()),
@@ -3985,9 +4163,22 @@ server &lt;- function(input, output, session) {
         y_axis_config$range &lt;- c(0, y_max_non_all)
       }
       
+      x_start &lt;- format(as.Date(input$budget_start), "%Y-%m-%d")
+      x_end   &lt;- format(as.Date(input$budget_end),   "%Y-%m-%d")
+      period_months &lt;- as.integer(
+        difftime(as.Date(input$budget_end), as.Date(input$budget_start), units = "days") / 30
+      )
+      dtick_val &lt;- if (period_months &lt;= 24) "M3" else if (period_months &lt;= 60) "M6" else "M12"
+
       p &lt;- p %&gt;%
         layout(
-          xaxis = list(title = "", tickformat = "%Y-%m"),
+          xaxis = list(
+            title = "",
+            tickformat = "%Y-%m",
+            tickangle = 45,
+            range = c(x_start, x_end),
+            dtick = dtick_val
+          ),
           yaxis = y_axis_config,
           hovermode = "x unified",
           showlegend = FALSE
@@ -4016,12 +4207,23 @@ server &lt;- function(input, output, session) {
       layout(
         title = list(text = "Cumulative budget over time by category and site", x = 0.5, xanchor = "center"),
         showlegend = TRUE,
+        legend = list(
+          orientation = "h",
+          x = 0.5,
+          xanchor = "center",
+          y = -0.25,
+          yanchor = "top"
+        ),
         hovermode = "x unified",
-        margin = list(t = 110),
+        margin = list(t = 110, b = 120),
         annotations = facet_annotations
       )
   })
 
+  observeEvent(input$save_pdf_btn, {
+    fname &lt;- paste0(workbook_name_effective(), "_budget_", format(Sys.Date(), "%Y%m%d"), ".pdf")
+    session$sendCustomMessage("save-pdf", list(filename = fname))
+  })
 
 
   output$export_control &lt;- renderUI({
