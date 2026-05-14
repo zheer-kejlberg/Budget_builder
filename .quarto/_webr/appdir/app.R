@@ -492,7 +492,7 @@ find_posts_with_deleted_site <- function(posts_tbl, site_registry) {
     pull(id)
 }
 
-get_post_amendment_fields <- function(post_row, budget_start, budget_end, category_registry, site_registry) {
+get_post_amendment_fields <- function(post_row, budget_start, budget_end, category_registry, site_registry, post_import_issues = NULL) {
   fields <- character(0)
 
   if (post_row$start_date < budget_start || post_row$end_date > budget_end) fields <- c(fields, "post_date_range")
@@ -506,6 +506,16 @@ get_post_amendment_fields <- function(post_row, budget_start, budget_end, catego
     filter(name == post_row$center, is_deleted) %>%
     nrow() > 0
   if (bad_site) fields <- c(fields, "center")
+
+  # Check for formula errors in import issues
+  if (!is.null(post_import_issues) && nrow(post_import_issues) > 0) {
+    issue_row <- post_import_issues %>% filter(id == post_row$id)
+    if (nrow(issue_row) > 0 && !is.na(issue_row$import_issues[1]) && nzchar(issue_row$import_issues[1])) {
+      if (grepl("Formula error", issue_row$import_issues[1])) {
+        fields <- c(fields, "function_expr")
+      }
+    }
+  }
 
   unique(fields)
 }
@@ -717,9 +727,19 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
   )
 }
 
-flag_posts <- function(posts_tbl, budget_start, budget_end) {
+flag_posts <- function(posts_tbl, budget_start, budget_end, preserve_existing = FALSE) {
   posts_tbl %>%
-    mutate(needs_amendment = start_date < budget_start | end_date > budget_end)
+    mutate(
+      date_issue = start_date < budget_start | end_date > budget_end,
+      needs_amendment = if (preserve_existing) {
+        # Preserve existing TRUE values, only add new ones
+        needs_amendment | date_issue
+      } else {
+        # Full replacement (for initial import)
+        date_issue
+      }
+    ) %>%
+    select(-date_issue)
 }
 
 build_long_budget <- function(posts_tbl, budget_start, budget_end, salaries_lookup = data.frame(), inflation_pct = 0, salaries_tbl = NULL) {
@@ -751,11 +771,18 @@ build_long_budget <- function(posts_tbl, budget_start, budget_end, salaries_look
       error = function(e) NULL
     )
 
+    # Create base tibble (either from resolved values or with NAs for errors)
     if (is.null(resolved)) {
-      return(tibble())
+      base_result <- tibble(
+        month = row_months,
+        value = NA_real_
+      )
+    } else {
+      base_result <- resolved
     }
-
-    resolved %>%
+    
+    # Add post metadata and calculations to all rows
+    base_result %>%
       mutate(
         id = row$id,
         center = row$center,
@@ -2028,7 +2055,9 @@ server <- function(input, output, session) {
     amend_fields = character(),
     table_refresh_nonce = 0L,
     success_text = NULL,
-    success_at = NULL
+    success_at = NULL,
+    post_import_issues = tibble(id = integer(), import_issues = character()),
+    current_post_amendment_reason = NULL
   )
 
   show_error_modal <- function(msg) {
@@ -2059,6 +2088,7 @@ server <- function(input, output, session) {
     updateSelectInput(session, "center", label = amend_label("Site", show_amend = is_amended_field("center"), required = TRUE))
     updateSelectInput(session, "category", label = amend_label("Category", show_amend = is_amended_field("category"), required = TRUE))
     updateDateRangeInput(session, "post_date_range", label = amend_label("Date range", show_amend = is_amended_field("post_date_range"), required = TRUE))
+    updateTextInput(session, "function_expr", label = amend_label("Formula expression", show_amend = is_amended_field("function_expr")))
   }
 
   reset_form <- function() {
@@ -2495,7 +2525,7 @@ server <- function(input, output, session) {
     updateDateRangeInput(session, "budget_range", start = input$budget_start, end = input$budget_end)
     updateDateRangeInput(session, "filter_month_range", start = input$budget_start, end = input$budget_end)
 
-    rv$posts <- flag_posts(rv$posts, input$budget_start, input$budget_end)
+    rv$posts <- flag_posts(rv$posts, input$budget_start, input$budget_end, preserve_existing = TRUE)
   }, ignoreInit = FALSE)
 
   # Issue #3: Workbook name validation and live updates while typing
@@ -2581,7 +2611,21 @@ server <- function(input, output, session) {
     }
 
     is_new <- is.na(rv$editing_site_id)
-    site_id <- if (is_new) rv$next_site_id else rv$editing_site_id
+    
+    # If adding new site, check if a deleted site with this name exists - reuse its ID
+    if (is_new) {
+      deleted_with_name <- rv$site_registry %>%
+        filter(is_deleted, tolower(name) == tolower(nm))
+      if (nrow(deleted_with_name) == 1) {
+        site_id <- deleted_with_name$id[1]
+        is_new <- FALSE
+      } else {
+        site_id <- rv$next_site_id
+      }
+    } else {
+      site_id <- rv$editing_site_id
+    }
+    
     prev <- rv$site_registry %>% filter(id == site_id)
     prev_default <- if (nrow(prev) == 1) isTRUE(prev$is_default) else FALSE
     prev_locked <- if (nrow(prev) == 1) isTRUE(prev$is_locked) else FALSE
@@ -2603,10 +2647,86 @@ server <- function(input, output, session) {
 
     old_name <- if (nrow(prev) == 1) prev$name[[1]] else NULL
     rv$site_registry <- rv$site_registry %>% filter(id != site_id) %>% bind_rows(new_site)
-    if (is_new) rv$next_site_id <- rv$next_site_id + 1L
+    # Only increment next_site_id if we actually used it for a new site
+    if (is_new && site_id == rv$next_site_id) rv$next_site_id <- rv$next_site_id + 1L
 
     if (!is.null(old_name) && nzchar(old_name) && old_name != nm) {
       rv$posts <- rv$posts %>% mutate(center = if_else(center == old_name, nm, center))
+    }
+
+    # Auto-resolve amendment errors for posts that had this site marked as invalid
+    if (nrow(rv$post_import_issues) > 0) {
+      site_error_pattern <- paste0("Site not in registry: ", nm)
+      posts_with_site_issue <- rv$post_import_issues %>%
+        filter(grepl(site_error_pattern, import_issues, fixed = TRUE))
+      
+      if (nrow(posts_with_site_issue) > 0) {
+        for (i in seq_len(nrow(posts_with_site_issue))) {
+          issue_id <- posts_with_site_issue$id[i]
+          current_issues <- posts_with_site_issue$import_issues[i]
+          
+          # Remove only the site error from this post's issues
+          issue_list <- strsplit(current_issues, "; ", fixed = TRUE)[[1]]
+          new_issues <- issue_list[!grepl(site_error_pattern, issue_list, fixed = TRUE)]
+          new_issues_text <- paste(new_issues, collapse = "; ")
+          
+          if (nzchar(new_issues_text)) {
+            # Still has other issues - update the issues text
+            rv$post_import_issues <- rv$post_import_issues %>%
+              mutate(import_issues = if_else(id == issue_id, new_issues_text, import_issues))
+          } else {
+            # No more issues - remove from post_import_issues and clear amendment flag
+            rv$post_import_issues <- rv$post_import_issues %>% filter(id != issue_id)
+            rv$posts <- rv$posts %>%
+              mutate(needs_amendment = if_else(id == issue_id, FALSE, needs_amendment))
+          }
+        }
+      }
+    }
+
+    # Also handle posts that were marked for amendment when this site was deleted
+    # These are posts with needs_amendment=TRUE, center == site name, and no import issues
+    if (nrow(rv$posts) > 0) {
+      posts_to_revalidate <- rv$posts %>%
+        filter(needs_amendment, center == nm) %>%
+        anti_join(rv$post_import_issues, by = "id")
+      
+      if (nrow(posts_to_revalidate) > 0) {
+        for (i in seq_len(nrow(posts_to_revalidate))) {
+          post_row <- posts_to_revalidate[i, ]
+          
+          # Re-validate this post
+          revalidation <- check_import_post_issues(
+            post_row = post_row,
+            existing_posts = rv$posts %>% filter(id != post_row$id),
+            salaries_lookup = make_salary_lookup(rv$salaries),
+            inflation_pct = input$inflation_pct,
+            salaries_tbl = rv$salaries,
+            site_registry = rv$site_registry,
+            category_registry = rv$category_registry
+          )
+          
+          if (!revalidation$has_issues) {
+            # No more issues - clear amendment flag
+            rv$posts <- rv$posts %>%
+              mutate(needs_amendment = if_else(id == post_row$id, FALSE, needs_amendment))
+            
+            # If this post is currently being edited, refresh the form labels to remove !!!
+            if (!is.na(rv$editing_id) && rv$editing_id == post_row$id) {
+              amend_fields <- get_post_amendment_fields(
+                post_row = rv$posts %>% filter(id == post_row$id) %>% slice(1),
+                budget_start = as.Date(input$budget_start),
+                budget_end = as.Date(input$budget_end),
+                category_registry = rv$category_registry,
+                site_registry = rv$site_registry,
+                post_import_issues = rv$post_import_issues
+              )
+              rv$amend_fields <- amend_fields
+              refresh_post_field_labels()
+            }
+          }
+        }
+      }
     }
 
     rv$editing_site_id <- NA_integer_
@@ -2986,7 +3106,7 @@ server <- function(input, output, session) {
 
     if (mode == "function") {
       tagList(
-        textInput("function_expr", "Formula expression", value = isolate(rv$function_expr_draft), placeholder = "Expression using n, FTE, fte(site), salary_identifier$total_m and apply_inflation() helper"),
+        textInput("function_expr", amend_label("Formula expression", show_amend = is_amended_field("function_expr")), value = isolate(rv$function_expr_draft), placeholder = "Expression using n, FTE, fte(site), salary_identifier$total_m and apply_inflation() helper"),
         actionButton("show_formula_help", "Help: available formula variables")
       )
     } else {
@@ -3160,10 +3280,10 @@ server <- function(input, output, session) {
 
       if (apply_filters) {
         if (!is.null(input$filter_amount_min) && !is.na(input$filter_amount_min)) {
-          out <- out %>% filter(Value >= input$filter_amount_min)
+          out <- out %>% filter(is.na(Value) | Value >= input$filter_amount_min)
         }
         if (!is.null(input$filter_amount_max) && !is.na(input$filter_amount_max)) {
-          out <- out %>% filter(Value <= input$filter_amount_max)
+          out <- out %>% filter(is.na(Value) | Value <= input$filter_amount_max)
         }
         if (!is.null(input$filter_text) && nzchar(trimws(input$filter_text))) {
           txt <- tolower(trimws(input$filter_text))
@@ -3248,13 +3368,12 @@ server <- function(input, output, session) {
       mutate(
         `Post name` = post_name,
         Site = center,
-        Cause = if_else(!is.na(import_issues), "Import Error", "User-inactivated"),
         Action = sprintf(
           '<button class="btn btn-sm btn-success activate-post-btn" data-post-id="%d">Activate post</button>',
           id
         )
       ) %>%
-      select(id, import_issues, `Post name`, Site, Cause, Action)
+      select(id, import_issues, `Post name`, Site, Action)
     
     tbl <- datatable(
       display_df %>% select(-id, -import_issues),
@@ -3272,12 +3391,7 @@ server <- function(input, output, session) {
         "  Shiny.setInputValue('activate_post_id', id, {priority: 'event'});",
         "});"
       )
-    ) %>%
-      formatStyle(
-        columns = "Cause",
-        target = "row",
-        backgroundColor = styleEqual("Import Error", "#fff3cd")
-      )
+    )
     
     tbl
   }, server = FALSE)
@@ -3858,12 +3972,23 @@ server <- function(input, output, session) {
     updateSelectInput(session, "application_status",
       selected = if (!is.null(row$application_status) && nzchar(row$application_status)) row$application_status else "Applied for")
 
+    # Store amendment reasons for display
+    rv$current_post_amendment_reason <- NULL
+    if (isTRUE(row$needs_amendment)) {
+      # Check for import issues first
+      import_issue_row <- rv$post_import_issues %>% filter(id == sid)
+      if (nrow(import_issue_row) > 0) {
+        rv$current_post_amendment_reason <- import_issue_row$import_issues[[1]]
+      }
+    }
+
     amend_fields <- get_post_amendment_fields(
       post_row = row,
       budget_start = as.Date(input$budget_start),
       budget_end = as.Date(input$budget_end),
       category_registry = rv$category_registry,
-      site_registry = rv$site_registry
+      site_registry = rv$site_registry,
+      post_import_issues = rv$post_import_issues
     )
     rv$amend_fields <- amend_fields
     rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L
@@ -3920,44 +4045,12 @@ server <- function(input, output, session) {
     sid <- input$activate_post_id
     if (is.null(sid) || is.na(sid)) return()
     row_to_activate <- rv$inactive_posts %>% filter(id == sid)
+    req(nrow(row_to_activate) == 1)
     
-    # Check for import issues
-    if (nrow(row_to_activate) > 0 && !is.na(row_to_activate$import_issues[[1]]) && nzchar(row_to_activate$import_issues[[1]])) {
-      # Load into edit fields
-      rv$editing_id <- sid
-      updateTextInput(session, "post_name", value = row_to_activate$post_name[[1]])
-      updateSelectInput(session, "center", selected = row_to_activate$center[[1]])
-      updateSelectInput(session, "category", selected = row_to_activate$category[[1]])
-      updateDateRangeInput(session, "post_date_range", start = row_to_activate$start_date[[1]], end = row_to_activate$end_date[[1]])
-      updateNumericInput(session, "fte", value = row_to_activate$fte[[1]])
-      updateRadioButtons(session, "value_mode", selected = row_to_activate$value_mode[[1]])
-      updateRadioButtons(session, "value_unit", selected = row_to_activate$value_unit[[1]])
-      updateTextInput(session, "note", value = row_to_activate$note[[1]])
-      updateSelectInput(session, "application_status", selected = row_to_activate$application_status[[1]])
-      
-      # Load formula fields
-      rv$constant_expr_draft <- if (!is.na(row_to_activate$constant_expr[[1]])) row_to_activate$constant_expr[[1]] else "0"
-      rv$function_expr_draft <- if (!is.na(row_to_activate$function_expr[[1]])) row_to_activate$function_expr[[1]] else ""
-      if (row_to_activate$value_mode[[1]] == "function") {
-        updateTextInput(session, "function_expr", value = rv$function_expr_draft)
-      }
-      rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L
-      
-      showModal(modalDialog(
-        title = "Cannot Activate: Post Has Issues",
-        tagList(
-          tags$p("This post has the following issues that must be resolved before activation:"),
-          tags$p(tags$strong(row_to_activate$import_issues[[1]]), style = "color: #d9534f;"),
-          tags$p("The post has been loaded into the form above. Please correct the issues and click 'Save Post' to fix them.")
-        ),
-        footer = modalButton("Close")
-      ))
-    } else {
-      # Normal activation for posts without issues
-      rv$inactive_posts <- rv$inactive_posts %>% filter(id != sid)
-      rv$posts <- bind_rows(rv$posts, row_to_activate %>% select(-import_issues))
-      set_success("Post reactivated.")
-    }
+    # Normal activation for user-inactivated posts
+    rv$inactive_posts <- rv$inactive_posts %>% filter(id != sid)
+    rv$posts <- bind_rows(rv$posts, row_to_activate)
+    set_success("Post reactivated.")
   })
 
   observeEvent(input$add_or_update, {
@@ -4076,10 +4169,42 @@ server <- function(input, output, session) {
           bind_rows(row_to_save)
         # Remove from inactive_posts if editing a post that was there
         rv$inactive_posts <- rv$inactive_posts %>% filter(id != rv$editing_id)
+        # Clear any import issue tracking for this post since it's been re-edited
+        rv$post_import_issues <- rv$post_import_issues %>% filter(id != rv$editing_id)
         set_success(paste("Post updated:", row_to_save$post_name, "in", row_to_save$center))
       }
 
-      rv$posts <- flag_posts(rv$posts, input$budget_start, input$budget_end)
+      rv$posts <- flag_posts(rv$posts, input$budget_start, input$budget_end, preserve_existing = TRUE)
+      
+      # Re-validate the saved post against current registries and check if it still needs amendment
+      saved_post <- rv$posts %>% filter(id == row_to_save$id)
+      if (nrow(saved_post) > 0) {
+        # Re-check for import issues
+        revalidation <- check_import_post_issues(
+          post_row = saved_post[1, ],
+          existing_posts = rv$posts %>% filter(id != row_to_save$id),
+          salaries_lookup = make_salary_lookup(rv$salaries),
+          inflation_pct = input$inflation_pct,
+          salaries_tbl = rv$salaries,
+          site_registry = rv$site_registry,
+          category_registry = rv$category_registry
+        )
+        
+        if (revalidation$has_issues) {
+          # Still has issues - add to post_import_issues
+          rv$post_import_issues <- rv$post_import_issues %>%
+            filter(id != row_to_save$id) %>%
+            bind_rows(tibble(id = row_to_save$id, import_issues = revalidation$issues_text))
+          rv$posts <- rv$posts %>%
+            mutate(needs_amendment = if_else(id == row_to_save$id, TRUE, needs_amendment))
+        } else {
+          # No more issues - clear from post_import_issues and amendment
+          rv$post_import_issues <- rv$post_import_issues %>% filter(id != row_to_save$id)
+          rv$posts <- rv$posts %>%
+            mutate(needs_amendment = if_else(id == row_to_save$id, FALSE, needs_amendment))
+        }
+      }
+      
       reset_form()
     }
 
@@ -4116,12 +4241,12 @@ server <- function(input, output, session) {
       rv$posts <- rv$posts %>%
         filter(id != rv$editing_id) %>%
         bind_rows(row_to_save)
-      # Remove from inactive_posts if editing a post that was there
-      rv$inactive_posts <- rv$inactive_posts %>% filter(id != rv$editing_id)
+      # Clear any import issue tracking for this post
+      rv$post_import_issues <- rv$post_import_issues %>% filter(id != rv$editing_id)
       set_success(paste("Post updated with override:", row_to_save$post_name, "in", row_to_save$center))
     }
 
-    rv$posts <- flag_posts(rv$posts, input$budget_start, input$budget_end)
+    rv$posts <- flag_posts(rv$posts, input$budget_start, input$budget_end, preserve_existing = TRUE)
     rv$pending_post_row <- NULL
     reset_form()
   })
@@ -4804,15 +4929,20 @@ server <- function(input, output, session) {
           category_registry = category_registry_restored
         )
         post$import_issues <- if (validation$has_issues) validation$issues_text else NA_character_
+        post$needs_amendment <- validation$has_issues
         post
       })
       
-      # Separate good posts from problematic ones
-      good_posts <- posts_with_validation %>% filter(is.na(import_issues)) %>% select(-import_issues)
-      bad_posts <- posts_with_validation %>% filter(!is.na(import_issues))
+      # Posts with import issues stay active but marked for amendment
+      all_imported_posts <- posts_with_validation %>% select(-import_issues)
       
-      # Import previously inactive posts from the export file
-      previously_inactive <- make_empty_posts() %>% slice(0) %>% mutate(import_issues = character())
+      # Store import issues in reactive value for display
+      rv$post_import_issues <- posts_with_validation %>%
+        filter(!is.na(import_issues)) %>%
+        select(id, import_issues)
+      
+      # Import previously inactive posts from the export file (for user-inactivated posts)
+      previously_inactive <- make_empty_posts() %>% slice(0)
       if ("inactive_posts" %in% sheets) {
         imported_inactive <- readxl::read_excel(path, sheet = "inactive_posts", col_types = "text")
         if (nrow(imported_inactive) > 0) {
@@ -4820,11 +4950,9 @@ server <- function(input, output, session) {
         }
       }
       
-      # Combine bad_posts from current import with previously inactive posts
-      # Keep newly identified issues but preserve old inactive posts
-      rv$inactive_posts <- bind_rows(bad_posts, previously_inactive)
-      rv$posts <- good_posts
-      rv$posts <- flag_posts(rv$posts, as.Date(start_val), as.Date(end_val))
+      rv$inactive_posts <- previously_inactive
+      rv$posts <- all_imported_posts
+      rv$posts <- flag_posts(rv$posts, as.Date(start_val), as.Date(end_val), preserve_existing = TRUE)
       rv$salaries <- salaries_parsed
       rv$next_salary_id <- ifelse(nrow(salaries_parsed), max(salaries_parsed$id, na.rm = TRUE) + 1L, 1L)
       
