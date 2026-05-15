@@ -620,21 +620,17 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
   # Helper to compute FTE vectors for a given site or vector of sites
   get_site_fte <- function(sites) {
     if (is.null(all_posts_tbl) || !nrow(all_posts_tbl)) {
-      return(rep(NA_real_, n_years))
+      return(rep(NA_real_, n_months))
     }
     
     sites <- as.character(sites)
     site_posts <- all_posts_tbl[all_posts_tbl$center %in% sites, ]
     
     monthly <- map_dbl(months, function(m) {
-      sum(site_posts$fte[site_posts$start_date <= m & site_posts$end_date >= m], na.rm = TRUE) / 12
+      sum(site_posts$fte[site_posts$start_date <= m & site_posts$end_date >= m], na.rm = TRUE)
     })
     
-    vapply(seq_len(n_years), function(i) {
-      idx_start <- (i - 1) * 12 + 1
-      idx_end <- min(i * 12, n_months)
-      sum(monthly[idx_start:idx_end], na.rm = TRUE)
-    }, numeric(1))
+    monthly
   }
 
   all_sites <- if (!is.null(all_posts_tbl) && nrow(all_posts_tbl) > 0) {
@@ -1610,7 +1606,6 @@ ui <- fluidPage(
       }
     });
 
-    
     "
   ))),
   tags$head(tags$script(HTML(
