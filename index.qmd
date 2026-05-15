@@ -76,6 +76,10 @@ make_empty_posts <- function() {
     constant_expr = character(),
     function_expr = character(),
     value_vector = list(),
+    sum_multiplier = character(),
+    sum_sites = character(),
+    sum_statuses = character(),
+    sum_posts = character(),
     note = character(),
     needs_amendment = logical(),
     application_status = character(),
@@ -669,88 +673,6 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
   }
 
   # Helper to compute sum of amounts across posts in given site(s)
-  get_site_total <- function(sites) {
-    if (is.null(all_posts_tbl) || !nrow(all_posts_tbl)) {
-      return(if (unit == "month") rep(0, n_months) else rep(0, n_years))
-    }
-    
-    sites <- as.character(sites)
-    current_post_id <- as.numeric(post_row$id[[1]])
-    
-    # Filter to posts in the specified sites (excluding current post and posts that use sum_total to prevent circular refs)
-    site_posts <- all_posts_tbl %>%
-      filter(
-        center %in% sites,
-        id != current_post_id,
-        value_mode == "variable" | !grepl("sum_total", function_expr, ignore.case = TRUE)
-      )
-    
-    if (!nrow(site_posts)) {
-      return(if (unit == "month") rep(0, n_months) else rep(0, n_years))
-    }
-    
-    # Always work with monthly values internally, then convert at the end if needed
-    result_monthly <- rep(0, n_months)
-    
-    for (i in seq_len(nrow(site_posts))) {
-      other_post <- site_posts[i, ]
-      other_mode <- as.character(other_post$value_mode[[1]])
-      other_unit <- as.character(other_post$value_unit[[1]])
-      other_id <- as.numeric(other_post$id[[1]])
-      
-      tryCatch({
-        # Evaluate the post to get its amounts (works for all modes that aren't using sum_total)
-        resolved_tibble <- resolve_post_values(
-          post_row = other_post,
-          salaries_lookup = salaries_lookup,
-          inflation_pct = inflation_pct,
-          fte_monthly_total = fte_monthly_total,
-          salaries_tbl = salaries_tbl,
-          budget_start = budget_start,
-          all_posts_tbl = all_posts_tbl
-        )
-        
-        # Extract the value column and its corresponding months
-        # resolve_post_values ALWAYS returns monthly values
-        if (!is.null(resolved_tibble) && nrow(resolved_tibble) > 0) {
-          other_amounts_monthly <- resolved_tibble$value
-          other_months <- resolved_tibble$month
-          
-          # Align other_post's values to the calling post's date range
-          # Create a vector for this post's contribution spanning the full calling period
-          this_contribution <- rep(0, n_months)
-          
-          # Find which indices in the calling post's months correspond to other_post's months
-          for (j in seq_len(length(other_months))) {
-            calling_idx <- which(months == other_months[j])
-            if (length(calling_idx) > 0) {
-              this_contribution[calling_idx[1]] <- other_amounts_monthly[j]
-            }
-          }
-          
-          # Add to result
-          result_monthly <- result_monthly + this_contribution
-        }
-      }, error = function(e) {
-        # If a post fails to evaluate, skip it silently
-        NULL
-      })
-    }
-    
-    # Convert back to the calling post's unit if needed
-    if (unit == "year") {
-      # Aggregate monthly to yearly
-      result_yearly <- vapply(seq_len(n_years), function(j) {
-        idx_start <- (j - 1) * 12 + 1
-        idx_end <- min(j * 12, n_months)
-        sum(result_monthly[idx_start:idx_end], na.rm = TRUE)
-      }, numeric(1))
-      return(result_yearly)
-    } else {
-      return(result_monthly)
-    }
-  }
-
   # Issue #4: Generate salary objects for identifier$total_m access
   salary_objs <- list()
   if (!is.null(salaries_tbl) && nrow(salaries_tbl) > 0) {
@@ -764,9 +686,6 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
     all_sites = all_sites,
     fte = function(site = current_site) {
       get_site_fte(site)
-    },
-    sum_total = function(site = current_site) {
-      get_site_total(site)
     },
     inflation_factors = if (unit == "year") inflation_year_factors else inflation_month_factors,
     apply_inflation = function(base_value) {
@@ -801,7 +720,84 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
     if (!is.numeric(values)) {
       stop("Amount formula must resolve to numeric values.", call. = FALSE)
     }
+  } else if (mode == "sum") {
+    # Sum mode: use only the selected posts (sites and statuses are already baked into selection)
+    current_post_id <- as.numeric(post_row$id[[1]])
+    
+    # Parse the sum fields (stored as "||"-separated strings)
+    sum_posts_labels <- if (nzchar(trimws(as.character(post_row$sum_posts[[1]])))) {
+      strsplit(as.character(post_row$sum_posts[[1]]), "||", fixed = TRUE)[[1]]
+    } else {
+      character(0)
+    }
+    
+    # Filter posts: ONLY use the selected posts (sum_posts_labels)
+    # Don't re-filter by sites/statuses since those are already in the selected posts list
+    filtered_posts <- if (!is.null(all_posts_tbl) && nrow(all_posts_tbl) > 0 && length(sum_posts_labels) > 0) {
+      # Create labels to match against
+      all_posts_tbl %>%
+        mutate(label = paste0(post_name, " (", center, ")")) %>%
+        filter(
+          label %in% sum_posts_labels,
+          id != current_post_id,
+          value_mode != "sum"
+        ) %>%
+        select(-label)
+    } else {
+      tibble()
+    }
+    
+    # Sum the filtered posts
+    values <- rep(0, n_months)
+    
+    for (i in seq_len(nrow(filtered_posts))) {
+      other_post <- filtered_posts[i, ]
+      tryCatch({
+        resolved_tibble <- resolve_post_values(
+          post_row = other_post,
+          salaries_lookup = salaries_lookup,
+          inflation_pct = inflation_pct,
+          fte_monthly_total = fte_monthly_total,
+          salaries_tbl = salaries_tbl,
+          budget_start = budget_start,
+          all_posts_tbl = all_posts_tbl
+        )
+        
+        if (!is.null(resolved_tibble) && nrow(resolved_tibble) > 0) {
+          other_amounts_monthly <- resolved_tibble$value
+          other_months <- resolved_tibble$month
+          
+          # Align to calling post's date range
+          for (j in seq_len(length(other_months))) {
+            calling_idx <- which(months == other_months[j])
+            if (length(calling_idx) > 0) {
+              values[calling_idx[1]] <- values[calling_idx[1]] + other_amounts_monthly[j]
+            }
+          }
+        }
+      }, error = function(e) { NULL })
+    }
+    
+    # Apply multiplier formula
+    multiplier_expr <- if (nzchar(trimws(as.character(post_row$sum_multiplier[[1]])))) {
+      as.character(post_row$sum_multiplier[[1]])
+    } else {
+      "1"
+    }
+    
+    multiplier <- safe_eval_expr(multiplier_expr, fte = fte, n = n_months, extra_env = extra_env)
+    if (length(multiplier) == 1) {
+      multiplier <- rep(as.numeric(multiplier), n_months)
+    }
+    values <- values * multiplier
+    
+    # Now expand if needed (sum mode always returns monthly, but we need to match unit)
+    if (unit == "year") {
+      values <- expand_year_values(values, n_months)
+    }
+    
   } else {
+    # Variable mode
     values <- unlist(post_row$value_vector, use.names = FALSE)
     if (!is.numeric(values)) {
       stop("Variable amounts must be numeric.", call. = FALSE)
@@ -1935,7 +1931,7 @@ ui <- fluidPage(
       selectInput("category", required_label("Category"), choices = c("", make_default_categories()$name), selected = ""),
       dateRangeInput("post_date_range", required_label("Date range"), start = NA, end = NA, width = "100%"),
       numericInput("fte", "Full-time equivalent (FTE) / year", value = NA_real_, min = 0, step = 0.1),
-      selectInput("value_mode", "How should amount be defined?", choices = c("Formula" = "function", "Variable" = "variable"), selected = "function"),
+      selectInput("value_mode", "How should amount be defined?", choices = c("Formula" = "function", "Variable" = "variable", "Sum of other posts" = "sum"), selected = "function"),
       uiOutput("value_unit_ui"),
       uiOutput("value_inputs_ui"),
       textAreaInput("note", "Note", value = "", rows = 2),
@@ -2220,16 +2216,25 @@ server <- function(input, output, session) {
     rv$variable_defaults <- numeric()
     rv$constant_expr_draft <- "0"
     rv$function_expr_draft <- ""
+    rv$sum_multiplier_draft <- "1"
+    rv$sum_sites_draft <- character()
+    rv$sum_statuses_draft <- character()
+    rv$sum_posts_draft <- character()
     rv$amend_fields <- character(0)
     updateSelectizeInput(session, "template_name", selected = "")
     updateTextInput(session, "post_name", value = "")
     updateSelectInput(session, "center", selected = "")
     updateSelectInput(session, "category", selected = "")
-    updateDateRangeInput(session, "post_date_range", start = NA, end = NA)
+    updateDateRangeInput(session, "post_date_range", start = isolate(input$budget_start %||% NA), end = isolate(input$budget_end %||% NA))
     updateNumericInput(session, "fte", value = NA_real_)
     updateSelectInput(session, "value_mode", selected = "function")
     updateRadioButtons(session, "value_unit", selected = "month")
     updateTextInput(session, "function_expr", value = "")
+    updateTextInput(session, "sum_multiplier", value = "1")
+    # For sum mode, apply smart defaults for new posts
+    updateSelectizeInput(session, "sum_sites", selected = input$center %||% character())
+    updateSelectizeInput(session, "sum_statuses", selected = "Applied for")
+    updateSelectizeInput(session, "sum_posts", selected = character())
     updateTextAreaInput(session, "note", value = "")
     updateSelectInput(session, "application_status", selected = "Applied for")
     rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L
@@ -3220,11 +3225,11 @@ server <- function(input, output, session) {
   observeEvent(input$value_unit,       { rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L }, ignoreInit = TRUE)
   observeEvent(input$post_date_range,  { rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L }, ignoreInit = TRUE)
 
-  # Render unit radio buttons - only allow "Month" for formula mode
+  # Render unit radio buttons - only allow "Month" for formula and sum modes
   output$value_unit_ui <- renderUI({
     mode <- input$value_mode
-    if (mode == "function") {
-      # Formula mode: only allow monthly
+    if (mode == "function" || mode == "sum") {
+      # Formula and sum modes: only allow monthly
       radioButtons("value_unit", "Input amount per", choices = c("Month" = "month"), selected = "month", inline = TRUE)
     } else {
       # Variable mode: allow both
@@ -3232,13 +3237,75 @@ server <- function(input, output, session) {
     }
   })
 
-  # When mode changes to "function", ensure value_unit is set to "month"
+  # When mode changes to "function" or "sum", ensure value_unit is set to "month"
   observeEvent(input$value_mode, {
-    if (input$value_mode == "function") {
+    if (input$value_mode == "function" || input$value_mode == "sum") {
       updateRadioButtons(session, "value_unit", selected = "month")
     }
   }, ignoreInit = TRUE)
 
+  # Reactive for dynamically filtering posts based on sum mode criteria
+  # Empty selections mean "show all" (no filter applied)
+  sum_mode_filtered_posts <- reactive({
+    selected_sites <- input$sum_sites
+    selected_statuses <- input$sum_statuses
+    
+    # If both are empty, show all posts (no filters applied)
+    if ((is.null(selected_sites) || length(selected_sites) == 0) && 
+        (is.null(selected_statuses) || length(selected_statuses) == 0)) {
+      if (nrow(rv$posts) > 0) {
+        rv$posts %>%
+          filter(value_mode != "sum") %>%
+          mutate(label = paste0(post_name, " (", center, ")")) %>%
+          pull(label)
+      } else {
+        character(0)
+      }
+    } else {
+      # At least one filter is set - apply both (OR logic: at least one must be true)
+      # But if only sites set, show posts from those sites
+      # If only statuses set, show posts with those statuses
+      if (is.null(selected_sites) || length(selected_sites) == 0) {
+        selected_sites <- unique(rv$site_registry$name[!rv$site_registry$is_deleted])
+      }
+      if (is.null(selected_statuses) || length(selected_statuses) == 0) {
+        selected_statuses <- c("Applied for", "Applied for elsewhere", "Not applied for", "Funded")
+      }
+      
+      if (nrow(rv$posts) > 0) {
+        rv$posts %>%
+          filter(
+            value_mode != "sum",
+            center %in% selected_sites,
+            application_status %in% selected_statuses
+          ) %>%
+          mutate(label = paste0(post_name, " (", center, ")")) %>%
+          pull(label)
+      } else {
+        character(0)
+      }
+    }
+  })
+  
+  # Observer to auto-sync post selection when sites/statuses filters change
+  # Keeps selected posts in sync: keeps valid posts, adds new matching posts
+  observeEvent(c(input$sum_sites, input$sum_statuses), {
+    available <- sum_mode_filtered_posts()
+    current_selection <- isolate(input$sum_posts %||% character(0))
+    
+    # Keep posts that are still available, add all newly available posts
+    still_valid <- intersect(current_selection, available)
+    posts_to_add <- setdiff(available, current_selection)
+    new_selection <- union(still_valid, posts_to_add)
+    
+    # Only update if selection actually changed
+    if (!identical(sort(new_selection), sort(current_selection))) {
+      updateSelectizeInput(session, "sum_posts",
+                          choices = available,
+                          selected = new_selection)
+    }
+  }, ignoreInit = TRUE, priority = 100)
+  
   output$value_inputs_ui <- renderUI({
     rv$value_inputs_refresh  # single reactive dependency
 
@@ -3252,7 +3319,40 @@ server <- function(input, output, session) {
         textInput("function_expr", amend_label("Formula expression", show_amend = is_amended_field("function_expr")), value = isolate(rv$function_expr_draft), placeholder = "Expression using n, FTE, fte(site), salary_identifier$total_m and apply_inflation() helper"),
         actionButton("show_formula_help", "Help: available formula variables")
       )
+    } else if (mode == "sum") {
+      # Sum of other posts mode - show 4 fields
+      # NO DEFAULTS APPLIED HERE - defaults are applied in reset_form() on new posts
+      available_sites <- sort(unique(rv$site_registry$name[!rv$site_registry$is_deleted]))
+      available_statuses <- c("Applied for", "Applied for elsewhere", "Not applied for", "Funded")
+      
+      # Get dynamically filtered posts - updates as sites/statuses change
+      filtered_posts_list <- sum_mode_filtered_posts()
+      
+      # Get current selections directly from inputs (which have defaults from reset_form)
+      current_multiplier <- isolate(input$sum_multiplier %||% "1")
+      current_sites <- isolate(input$sum_sites %||% character())
+      current_statuses <- isolate(input$sum_statuses %||% character())
+      
+      tagList(
+        textInput("sum_multiplier", "Multiplier formula", value = current_multiplier, placeholder = "e.g., 1, 0.5, FTE*2, etc."),
+        selectizeInput("sum_sites", "Sites to include", 
+                       choices = available_sites, 
+                       selected = current_sites,
+                       multiple = TRUE,
+                       options = list(plugins = list('remove_button'))),
+        selectizeInput("sum_statuses", "Application statuses to include",
+                       choices = available_statuses,
+                       selected = current_statuses,
+                       multiple = TRUE,
+                       options = list(plugins = list('remove_button'))),
+        selectizeInput("sum_posts", "Posts to include",
+                       choices = filtered_posts_list,
+                       selected = isolate(input$sum_posts),
+                       multiple = TRUE,
+                       options = list(plugins = list('remove_button')))
+      )
     } else {
+      # Variable mode
       n_vals <- isolate(required_value_count())
       defaults <- isolate(rv$variable_defaults)
       if (length(defaults) < n_vals) defaults <- c(defaults, rep(0, n_vals - length(defaults)))
@@ -4076,6 +4176,22 @@ server <- function(input, output, session) {
     rv$function_expr_draft <- input$function_expr
   }, ignoreInit = TRUE)
 
+  observeEvent(input$sum_multiplier, {
+    rv$sum_multiplier_draft <- input$sum_multiplier
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$sum_sites, {
+    rv$sum_sites_draft <- input$sum_sites
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$sum_statuses, {
+    rv$sum_statuses_draft <- input$sum_statuses
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$sum_posts, {
+    rv$sum_posts_draft <- input$sum_posts
+  }, ignoreInit = TRUE)
+
   observeEvent(input$edit_selected, {
     sid <- selected_post_id()
     if (is.na(sid)) {
@@ -4101,16 +4217,51 @@ server <- function(input, output, session) {
     rv$variable_defaults <- unlist(row$value_vector[[1]], use.names = FALSE)
     rv$constant_expr_draft <- row$constant_expr
     rv$function_expr_draft <- row$function_expr
+    
+    # Load sum mode fields
+    rv$sum_multiplier_draft <- if (!is.null(row$sum_multiplier) && nzchar(as.character(row$sum_multiplier))) {
+      as.character(row$sum_multiplier)
+    } else {
+      "1"
+    }
+    
+    rv$sum_sites_draft <- if (!is.null(row$sum_sites) && nzchar(as.character(row$sum_sites))) {
+      strsplit(as.character(row$sum_sites), "||", fixed = TRUE)[[1]]
+    } else {
+      character()
+    }
+    
+    rv$sum_statuses_draft <- if (!is.null(row$sum_statuses) && nzchar(as.character(row$sum_statuses))) {
+      strsplit(as.character(row$sum_statuses), "||", fixed = TRUE)[[1]]
+    } else {
+      character()
+    }
+    
+    rv$sum_posts_draft <- if (!is.null(row$sum_posts) && nzchar(as.character(row$sum_posts))) {
+      strsplit(as.character(row$sum_posts), "||", fixed = TRUE)[[1]]
+    } else {
+      character()
+    }
 
     updateTextInput(session, "post_name", value = row$post_name)
     updateSelectInput(session, "center", selected = row$center)
     updateSelectInput(session, "category", selected = row$category)
     updateDateRangeInput(session, "post_date_range", start = row$start_date, end = row$end_date)
     updateNumericInput(session, "fte", value = row$fte)
-    selected_mode <- if (identical(row$value_mode, "variable")) "variable" else "function"
+    selected_mode <- if (identical(row$value_mode, "variable")) {
+      "variable"
+    } else if (identical(row$value_mode, "sum")) {
+      "sum"
+    } else {
+      "function"
+    }
     updateSelectInput(session, "value_mode", selected = selected_mode)
     updateRadioButtons(session, "value_unit", selected = row$value_unit)
     updateTextInput(session, "function_expr", value = row$function_expr)
+    updateTextInput(session, "sum_multiplier", value = rv$sum_multiplier_draft)
+    updateSelectizeInput(session, "sum_sites", selected = rv$sum_sites_draft)
+    updateSelectizeInput(session, "sum_statuses", selected = rv$sum_statuses_draft)
+    updateSelectizeInput(session, "sum_posts", selected = rv$sum_posts_draft)
     updateTextAreaInput(session, "note", value = row$note)
     updateSelectInput(session, "application_status",
       selected = if (!is.null(row$application_status) && nzchar(row$application_status)) row$application_status else "Applied for")
@@ -4242,6 +4393,10 @@ server <- function(input, output, session) {
       constant_expr = rv$constant_expr_draft,
       function_expr = ifelse(is.null(input$function_expr), rv$function_expr_draft, input$function_expr),
       value_vector = list(vec),
+      sum_multiplier = ifelse(is.null(input$sum_multiplier), rv$sum_multiplier_draft, input$sum_multiplier),
+      sum_sites = ifelse(is.null(input$sum_sites), rv$sum_sites_draft, paste(input$sum_sites, collapse = "||")),
+      sum_statuses = ifelse(is.null(input$sum_statuses), rv$sum_statuses_draft, paste(input$sum_statuses, collapse = "||")),
+      sum_posts = ifelse(is.null(input$sum_posts), rv$sum_posts_draft, paste(input$sum_posts, collapse = "||")),
       note = input$note,
       needs_amendment = FALSE,
       application_status = if (!is.null(input$application_status)) input$application_status else "Applied for"
@@ -4707,7 +4862,6 @@ server <- function(input, output, session) {
         tags$li(tags$b("n"), " - required vector length for the selected input period (months or years)"),
         tags$li(tags$b("FTE"), " - FTE for this post, as input by user"),
         tags$li(tags$b("fte(site)"), " - function returning total number of FTEs within each chosen period (month, year). By default sums across all positions within the current post's site, but this can be changed with the site argument; e.g., fte(site = 'Main'), fte(site = all_sites)."),
-        tags$li(tags$b("sum_total(site)"), " - function returning sum of all amounts across posts within each chosen period (month, year). By default sums across all posts in the current post's site, but this can be changed with the site argument; e.g., sum_total(site = 'Main'), sum_total(site = all_sites)."),
         tags$li(tags$b("this_site"), " - string, the current post's site name"),
         tags$li(tags$b("all_sites"), " - vector of all site names in the budget"),
         tags$li(tags$b("inflation_factors"), " - vector of inflation multipliers for each period (month or year, depending on post's period type)"),
