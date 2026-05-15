@@ -1505,6 +1505,9 @@ ui &lt;- fluidPage(
     .import-file-wrap .progress {
       margin-bottom: 0 !important;
     }
+    .export-progress-wrap .progress {
+      margin-bottom: 8px !important;
+    }
     .shiny-input-container .input-group .form-control,
     .shiny-input-container .input-group .input-group-btn .btn {
       height: 38px !important;
@@ -1953,6 +1956,7 @@ ui &lt;- fluidPage(
       tags$div(style = "width: 100%;",
         uiOutput("export_control")
       ),
+      uiOutput("export_progress"),
       uiOutput("export_error")
     )
   ),
@@ -2240,6 +2244,7 @@ server &lt;- function(input, output, session) {
     budget_error_text = NULL,
     export_error_text = NULL,
     export_error_at = NULL,
+    export_in_progress = FALSE,
     sites_error_text = NULL,
     categories_error_text = NULL,
     templates_error_text = NULL,
@@ -2366,6 +2371,26 @@ server &lt;- function(input, output, session) {
   output$export_error &lt;- renderUI({
     if (is.null(rv$export_error_text)) return(NULL)
     tags$div(class = "flash-msg flash-error", rv$export_error_text)
+  })
+
+  output$export_progress &lt;- renderUI({
+    if (!isTRUE(rv$export_in_progress)) return(NULL)
+    tags$div(
+      class = "export-progress-wrap",
+      tags$div(
+        class = "progress",
+        style = "margin-bottom: 0;",
+        tags$div(
+          class = "progress-bar progress-bar-striped active",
+          role = "progressbar",
+          `aria-valuenow` = "100",
+          `aria-valuemin` = "0",
+          `aria-valuemax` = "100",
+          style = "width: 100%; animation: progress-bar-stripes 2s linear infinite;",
+          "Exporting..."
+        )
+      )
+    )
   })
 
   observeEvent(rv$export_error_text, {
@@ -5044,6 +5069,177 @@ server &lt;- function(input, output, session) {
     ))
   })
 
+  # Parameterized versions that accept data as arguments (for use in deferred execution)
+  build_export_sheet_with_data &lt;- function(period_choice, posts_data, budget_start, budget_end, salaries_data, inflation_pct, squash_dims) {
+    if (!nrow(posts_data)) {
+      return(tibble(
+        Period = character(),
+        `Post name` = character(),
+        Site = character(),
+        Category = character(),
+        Note = character(),
+        `Start Date` = character(),
+        `End date` = character(),
+        FTE = numeric(),
+        Amount = numeric()
+      ))
+    }
+
+    long &lt;- build_long_budget(
+      posts_data,
+      budget_start,
+      budget_end,
+      salaries_lookup = make_salary_lookup(salaries_data),
+      inflation_pct = inflation_pct,
+      salaries_tbl = salaries_data
+    )
+    if (!nrow(long)) {
+      return(tibble(
+        Period = character(),
+        `Post name` = character(),
+        Site = character(),
+        Category = character(),
+        Note = character(),
+        `Start Date` = character(),
+        `End date` = character(),
+        FTE = numeric(),
+        Amount = numeric()
+      ))
+    }
+
+    meta &lt;- posts_data %&gt;%
+      select(id, start_date, end_date, note)
+
+    out &lt;- long %&gt;%
+      left_join(meta, by = "id") %&gt;%
+      mutate(
+        Period = case_when(
+          period_choice == "month" ~ period_month,
+          period_choice == "calendar_year" ~ as.character(calendar_year),
+          TRUE ~ paste0("Year ", project_year)
+        ),
+        `Post name` = post_name,
+        Site = center,
+        Category = category,
+        Note = note,
+        `Start Date` = start_date,
+        `End date` = end_date,
+        FTE = fte,
+        Amount = value
+      ) %&gt;%
+      select(Period, `Post name`, Site, Category, Note, `Start Date`, `End date`, FTE, Amount)
+
+    if (is.null(squash_dims)) squash_dims &lt;- character(0)
+
+    if ("Period" %in% squash_dims) out$Period &lt;- "All periods"
+    if ("Post name" %in% squash_dims) out$`Post name` &lt;- "All posts"
+    if ("Site" %in% squash_dims) out$Site &lt;- "All sites"
+    if ("Category" %in% squash_dims) out$Category &lt;- "All categories"
+    if ("Post name" %in% squash_dims) out$Note &lt;- "Mixed notes"
+
+    group_cols &lt;- c()
+    if (!("Period" %in% squash_dims)) group_cols &lt;- c(group_cols, "Period")
+    if (!("Post name" %in% squash_dims)) group_cols &lt;- c(group_cols, "Post name")
+    if (!("Site" %in% squash_dims)) group_cols &lt;- c(group_cols, "Site")
+    if (!("Category" %in% squash_dims)) group_cols &lt;- c(group_cols, "Category")
+    if (length(group_cols) == 0) group_cols &lt;- "Period"
+
+    out &lt;- out %&gt;%
+      group_by(across(all_of(group_cols))) %&gt;%
+      summarise(
+        Period = if ("Period" %in% group_cols) first(Period) else "All periods",
+        `Post name` = if ("Post name" %in% group_cols) first(`Post name`) else "All posts",
+        Site = if ("Site" %in% group_cols) first(Site) else "All sites",
+        Category = if ("Category" %in% group_cols) first(Category) else "All categories",
+        Note = if (n_distinct(Note) == 1) first(Note) else "Mixed notes",
+        `Start Date` = if (n_distinct(`Start Date`) == 1) first(`Start Date`) else as.Date(NA),
+        `End date` = if (n_distinct(`End date`) == 1) first(`End date`) else as.Date(NA),
+        FTE = if (n_distinct(FTE) == 1) first(FTE) else NA_real_,
+        Amount = sum(Amount),
+        .groups = "drop"
+      ) %&gt;%
+      mutate(
+        `Start Date` = as.character(`Start Date`),
+        `End date` = as.character(`End date`)
+      ) %&gt;%
+      arrange(Site, `Post name`, Period)
+
+    total_row &lt;- tibble(
+      Period = "TOTAL",
+      `Post name` = "",
+      Site = "",
+      Category = "",
+      Note = "",
+      `Start Date` = NA_character_,
+      `End date` = NA_character_,
+      FTE = NA_real_,
+      Amount = sum(out$Amount, na.rm = TRUE)
+    )
+    bind_rows(out, total_row)
+  }
+
+  build_export_wide_sheet_with_data &lt;- function(period_choice, posts_data, budget_start, budget_end, salaries_data, inflation_pct, squash_dims) {
+    long_df &lt;- build_export_sheet_with_data(period_choice, posts_data, budget_start, budget_end, salaries_data, inflation_pct, squash_dims)
+    if (!nrow(long_df)) return(tibble(Period = character()))
+
+    # Strip the TOTAL summary row before pivoting
+    data_rows &lt;- dplyr::filter(long_df, Period != "TOTAL")
+    if (!nrow(data_rows)) return(tibble(Period = character()))
+
+    # Pivot each post to its own column.
+    wide &lt;- tidyr::pivot_wider(
+      dplyr::select(data_rows, Period, Site, `Post name`, Amount),
+      names_from  = c(Site, `Post name`),
+      values_from = Amount,
+      names_sep   = " &gt; ",
+      values_fn   = sum,
+      values_fill = NA_real_
+    )
+
+    # Add a site-total column immediately after each site's post columns.
+    ordered_cols &lt;- "Period"
+    site_total_cols &lt;- character(0)
+    for (site in unique(data_rows$Site)) {
+      prefix  &lt;- paste0(site, " &gt; ")
+      pcols   &lt;- names(wide)[startsWith(names(wide), prefix)]
+      if (length(pcols) == 0) next
+      tcol &lt;- paste0(site, " &gt; Site total")
+      wide[[tcol]] &lt;- rowSums(as.matrix(wide[, pcols, drop = FALSE]), na.rm = TRUE)
+      site_total_cols &lt;- c(site_total_cols, tcol)
+      ordered_cols &lt;- c(ordered_cols, pcols, tcol)
+    }
+
+    grand_spacer &lt;- strrep(" ", length(unique(data_rows$Site)) + 1)
+    while (grand_spacer %in% names(wide)) {
+      grand_spacer &lt;- paste0(grand_spacer, " ")
+    }
+    wide[[grand_spacer]] &lt;- ""
+    ordered_cols &lt;- c(ordered_cols, grand_spacer)
+
+    grand_total_col &lt;- "All sites &gt; Total"
+    if (length(site_total_cols) &gt; 0) {
+      wide[[grand_total_col]] &lt;- rowSums(as.matrix(wide[, site_total_cols, drop = FALSE]), na.rm = TRUE)
+    } else {
+      wide[[grand_total_col]] &lt;- NA_real_
+    }
+    ordered_cols &lt;- c(ordered_cols, grand_total_col)
+
+    wide &lt;- wide[, ordered_cols, drop = FALSE]
+
+    # Append a grand TOTAL row.
+    num_cols &lt;- names(wide)[vapply(wide, is.numeric, logical(1))]
+    total_row &lt;- as.list(rep(NA, ncol(wide)))
+    names(total_row) &lt;- names(wide)
+    total_row$Period &lt;- "TOTAL"
+    for (col in num_cols) {
+      total_row[[col]] &lt;- sum(wide[[col]], na.rm = TRUE)
+    }
+    for (col in names(wide)[vapply(wide, is.character, logical(1))]) {
+      if (grepl("^\\s+$", col)) total_row[[col]] &lt;- ""
+    }
+    dplyr::bind_rows(wide, tibble::as_tibble(total_row))
+  }
+
   build_export_sheet &lt;- function(period_choice) {
     if (!nrow(rv$posts)) {
       return(tibble(
@@ -5241,47 +5437,71 @@ server &lt;- function(input, output, session) {
     rv$workbook_name &lt;- export_base_name
     rv$workbook_name_error &lt;- NULL
 
-    # Issue #3: Use workbook name for filename
+    # Snapshot all data SYNCHRONOUSLY while in reactive context
+    posts_snapshot &lt;- isolate(rv$posts)
+    salaries_snapshot &lt;- isolate(rv$salaries)
+    site_registry_snapshot &lt;- isolate(rv$site_registry)
+    category_registry_snapshot &lt;- isolate(rv$category_registry)
+    template_registry_snapshot &lt;- isolate(rv$template_registry)
+    budget_start_snapshot &lt;- isolate(input$budget_start)
+    budget_end_snapshot &lt;- isolate(input$budget_end)
+    inflation_pct_snapshot &lt;- isolate(input$inflation_pct)
+    squash_dims_snapshot &lt;- isolate(input$squash_dims)
+
+    # Set progress flag IMMEDIATELY (still synchronously) so Shiny queues the UI update
+    rv$export_in_progress &lt;- TRUE
     export_filename &lt;- paste0(export_base_name, ".xlsx")
-    
-    # Issue #4: Generate salary identifiers for existing salaries
-    salary_identifiers &lt;- character()
-    if (nrow(rv$salaries) &gt; 0) {
-      for (i in seq_len(nrow(rv$salaries))) {
-        if (is.na(rv$salaries$identifier[i]) || !nzchar(rv$salaries$identifier[i])) {
-          salary_identifiers[i] &lt;- generate_salary_identifier(rv$salaries$name[i], salary_identifiers)
-        } else {
-          salary_identifiers[i] &lt;- rv$salaries$identifier[i]
+
+    # NOW defer the heavy work so the progress bar update gets sent to browser FIRST
+    later::later(function() {
+      tryCatch({
+        # Generate salary identifiers for existing salaries
+        salaries_copy &lt;- salaries_snapshot
+        if (nrow(salaries_copy) &gt; 0) {
+          salary_identifiers &lt;- character()
+          for (i in seq_len(nrow(salaries_copy))) {
+            if (is.na(salaries_copy$identifier[i]) || !nzchar(salaries_copy$identifier[i])) {
+              salary_identifiers[i] &lt;- generate_salary_identifier(salaries_copy$name[i], salary_identifiers)
+            } else {
+              salary_identifiers[i] &lt;- salaries_copy$identifier[i]
+            }
+          }
+          salaries_copy$identifier &lt;- salary_identifiers
         }
-      }
-      rv$salaries$identifier &lt;- salary_identifiers
-    }
 
-    sheets &lt;- list(
-      by_project_year_wide  = to_js_sheet(build_export_wide_sheet("project_year"),  has_total_row = TRUE),
-      by_project_year_long  = to_js_sheet(build_export_sheet("project_year"),       has_total_row = TRUE),
-      by_calendar_year_wide = to_js_sheet(build_export_wide_sheet("calendar_year"), has_total_row = TRUE),
-      by_calendar_year_long = to_js_sheet(build_export_sheet("calendar_year"),      has_total_row = TRUE),
-      by_month_wide         = to_js_sheet(build_export_wide_sheet("month"),         has_total_row = TRUE),
-      by_month_long         = to_js_sheet(build_export_sheet("month"),              has_total_row = TRUE),
-      posts                 = to_js_sheet(serialize_posts(rv$posts)),
-      inactive_posts        = to_js_sheet(serialize_inactive_posts(rv$inactive_posts)),
-      salaries              = to_js_sheet(serialize_salaries(rv$salaries)),
-      sites                 = to_js_sheet(serialize_sites(rv$site_registry)),
-      categories            = to_js_sheet(serialize_categories(rv$category_registry)),
-      templates             = to_js_sheet(serialize_templates(rv$template_registry)),
-      meta                  = to_js_sheet(tibble(
-        key = c("budget_start", "budget_end", "inflation_pct", "workbook_name", "schema_version"),
-        value = c(as.character(input$budget_start), as.character(input$budget_end), as.character(input$inflation_pct), export_base_name, "2.0")
-      ))
-    )
+        # Build sheets using parameterized functions (no reactive access needed)
+        sheets &lt;- list(
+          by_project_year_wide  = to_js_sheet(build_export_wide_sheet_with_data("project_year",  posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
+          by_project_year_long  = to_js_sheet(build_export_sheet_with_data("project_year",       posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
+          by_calendar_year_wide = to_js_sheet(build_export_wide_sheet_with_data("calendar_year", posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
+          by_calendar_year_long = to_js_sheet(build_export_sheet_with_data("calendar_year",      posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
+          by_month_wide         = to_js_sheet(build_export_wide_sheet_with_data("month",         posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
+          by_month_long         = to_js_sheet(build_export_sheet_with_data("month",              posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
+          posts                 = to_js_sheet(serialize_posts(posts_snapshot)),
+          inactive_posts        = to_js_sheet(serialize_inactive_posts(isolate(rv$inactive_posts))),
+          salaries              = to_js_sheet(serialize_salaries(salaries_copy)),
+          sites                 = to_js_sheet(serialize_sites(site_registry_snapshot)),
+          categories            = to_js_sheet(serialize_categories(category_registry_snapshot)),
+          templates             = to_js_sheet(serialize_templates(template_registry_snapshot)),
+          meta                  = to_js_sheet(tibble(
+            key = c("budget_start", "budget_end", "inflation_pct", "workbook_name", "schema_version"),
+            value = c(as.character(budget_start_snapshot), as.character(budget_end_snapshot), as.character(inflation_pct_snapshot), export_base_name, "2.0")
+          ))
+        )
 
-    session$sendCustomMessage("download-xlsx", list(
-      filename = export_filename,
-      sheets = sheets
-    ))
+        # Send download and clear progress
+        session$sendCustomMessage("download-xlsx", list(
+          filename = export_filename,
+          sheets = sheets
+        ))
+        set_success(paste("Export started:", export_filename))
+        rv$export_in_progress &lt;- FALSE
 
-    set_success(paste("Export started:", export_filename))
+      }, error = function(e) {
+        rv$export_error_text &lt;- paste("Export error:", e$message)
+        rv$export_in_progress &lt;- FALSE
+      })
+    }, delay = 0.05)
   }
 
   observeEvent(input$export_confirm_yes, {
