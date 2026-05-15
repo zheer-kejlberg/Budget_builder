@@ -2208,6 +2208,11 @@ server <- function(input, output, session) {
     updateSelectizeInput(session, "sum_posts", selected = character())
     updateTextAreaInput(session, "note", value = "")
     updateSelectInput(session, "application_status", selected = "Applied for")
+    # Reset draft RVs so renderUI falls back to input defaults
+    rv$sum_multiplier_draft <- NULL
+    rv$sum_sites_draft <- NULL
+    rv$sum_statuses_draft <- NULL
+    rv$sum_posts_draft <- NULL
     rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L
     refresh_post_field_labels()
   }
@@ -3292,17 +3297,19 @@ server <- function(input, output, session) {
       )
     } else if (mode == "sum") {
       # Sum of other posts mode - show 4 fields
-      # NO DEFAULTS APPLIED HERE - defaults are applied in reset_form() on new posts
+      # Read from draft RVs (not inputs) to handle edit flow correctly
+      # Draft RVs are updated synchronously during edit, while inputs update asynchronously
       available_sites <- sort(unique(rv$site_registry$name[!rv$site_registry$is_deleted]))
       available_statuses <- c("Applied for", "Applied for elsewhere", "Not applied for", "Funded")
       
       # Get dynamically filtered posts - updates as sites/statuses change
       filtered_posts_list <- sum_mode_filtered_posts()
       
-      # Get current selections directly from inputs (which have defaults from reset_form)
-      current_multiplier <- isolate(input$sum_multiplier %||% "1")
-      current_sites <- isolate(input$sum_sites %||% character())
-      current_statuses <- isolate(input$sum_statuses %||% character())
+      # Get current selections from draft RVs (updated during edit) and inputs (updated during user interaction)
+      current_multiplier <- isolate(rv$sum_multiplier_draft %||% input$sum_multiplier %||% "1")
+      current_sites <- isolate(rv$sum_sites_draft %||% input$sum_sites %||% character())
+      current_statuses <- isolate(rv$sum_statuses_draft %||% input$sum_statuses %||% character())
+      current_posts <- isolate(rv$sum_posts_draft %||% input$sum_posts %||% character())
       
       tagList(
         textInput("sum_multiplier", "Multiplier formula", value = current_multiplier, placeholder = "e.g., 1, 0.5, FTE*2, etc."),
@@ -3318,7 +3325,7 @@ server <- function(input, output, session) {
                        options = list(plugins = list('remove_button'))),
         selectizeInput("sum_posts", "Posts to include",
                        choices = filtered_posts_list,
-                       selected = isolate(input$sum_posts),
+                       selected = current_posts,
                        multiple = TRUE,
                        options = list(plugins = list('remove_button')))
       )
