@@ -591,6 +591,8 @@ check_import_post_issues <- function(post_row, existing_posts, salaries_lookup =
   # Check if formula evaluates without error
   if (post_row$value_mode == "function" && nzchar(trimws(post_row$function_expr))) {
     fte_monthly_total <- rep(NA_real_, 12)
+    # Combine existing_posts with current post for context (excluding current post to avoid issues)
+    all_posts_for_eval <- bind_rows(existing_posts, post_row)
     tryCatch({
       resolve_post_values(
         post_row,
@@ -598,7 +600,8 @@ check_import_post_issues <- function(post_row, existing_posts, salaries_lookup =
         inflation_pct = inflation_pct,
         fte_monthly_total = fte_monthly_total,
         salaries_tbl = salaries_tbl,
-        budget_start = post_row$start_date
+        budget_start = post_row$start_date,
+        all_posts_tbl = all_posts_for_eval
       )
     }, error = function(e) {
       issues <<- c(issues, paste("Formula error:", conditionMessage(e)))
@@ -665,6 +668,89 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
     character(0)
   }
 
+  # Helper to compute sum of amounts across posts in given site(s)
+  get_site_total <- function(sites) {
+    if (is.null(all_posts_tbl) || !nrow(all_posts_tbl)) {
+      return(if (unit == "month") rep(0, n_months) else rep(0, n_years))
+    }
+    
+    sites <- as.character(sites)
+    current_post_id <- as.numeric(post_row$id[[1]])
+    
+    # Filter to posts in the specified sites (excluding current post and posts that use sum_total to prevent circular refs)
+    site_posts <- all_posts_tbl %>%
+      filter(
+        center %in% sites,
+        id != current_post_id,
+        value_mode == "variable" | !grepl("sum_total", function_expr, ignore.case = TRUE)
+      )
+    
+    if (!nrow(site_posts)) {
+      return(if (unit == "month") rep(0, n_months) else rep(0, n_years))
+    }
+    
+    # Always work with monthly values internally, then convert at the end if needed
+    result_monthly <- rep(0, n_months)
+    
+    for (i in seq_len(nrow(site_posts))) {
+      other_post <- site_posts[i, ]
+      other_mode <- as.character(other_post$value_mode[[1]])
+      other_unit <- as.character(other_post$value_unit[[1]])
+      other_id <- as.numeric(other_post$id[[1]])
+      
+      tryCatch({
+        # Evaluate the post to get its amounts (works for all modes that aren't using sum_total)
+        resolved_tibble <- resolve_post_values(
+          post_row = other_post,
+          salaries_lookup = salaries_lookup,
+          inflation_pct = inflation_pct,
+          fte_monthly_total = fte_monthly_total,
+          salaries_tbl = salaries_tbl,
+          budget_start = budget_start,
+          all_posts_tbl = all_posts_tbl
+        )
+        
+        # Extract the value column and its corresponding months
+        # resolve_post_values ALWAYS returns monthly values
+        if (!is.null(resolved_tibble) && nrow(resolved_tibble) > 0) {
+          other_amounts_monthly <- resolved_tibble$value
+          other_months <- resolved_tibble$month
+          
+          # Align other_post's values to the calling post's date range
+          # Create a vector for this post's contribution spanning the full calling period
+          this_contribution <- rep(0, n_months)
+          
+          # Find which indices in the calling post's months correspond to other_post's months
+          for (j in seq_len(length(other_months))) {
+            calling_idx <- which(months == other_months[j])
+            if (length(calling_idx) > 0) {
+              this_contribution[calling_idx[1]] <- other_amounts_monthly[j]
+            }
+          }
+          
+          # Add to result
+          result_monthly <- result_monthly + this_contribution
+        }
+      }, error = function(e) {
+        # If a post fails to evaluate, skip it silently
+        NULL
+      })
+    }
+    
+    # Convert back to the calling post's unit if needed
+    if (unit == "year") {
+      # Aggregate monthly to yearly
+      result_yearly <- vapply(seq_len(n_years), function(j) {
+        idx_start <- (j - 1) * 12 + 1
+        idx_end <- min(j * 12, n_months)
+        sum(result_monthly[idx_start:idx_end], na.rm = TRUE)
+      }, numeric(1))
+      return(result_yearly)
+    } else {
+      return(result_monthly)
+    }
+  }
+
   # Issue #4: Generate salary objects for identifier$total_m access
   salary_objs <- list()
   if (!is.null(salaries_tbl) && nrow(salaries_tbl) > 0) {
@@ -678,6 +764,9 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
     all_sites = all_sites,
     fte = function(site = current_site) {
       get_site_fte(site)
+    },
+    sum_total = function(site = current_site) {
+      get_site_total(site)
     },
     inflation_factors = if (unit == "year") inflation_year_factors else inflation_month_factors,
     apply_inflation = function(base_value) {
@@ -756,19 +845,25 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
   )
 }
 
-flag_posts <- function(posts_tbl, budget_start, budget_end, preserve_existing = FALSE) {
+flag_posts <- function(posts_tbl, budget_start, budget_end, preserve_existing = FALSE, post_import_issues = NULL) {
   posts_tbl %>%
     mutate(
       date_issue = start_date < budget_start | end_date > budget_end,
+      # Check if this post has non-daterange import issues
+      has_other_issues = if (!is.null(post_import_issues) && nrow(post_import_issues) > 0) {
+        id %in% post_import_issues$id
+      } else {
+        FALSE
+      },
       needs_amendment = if (preserve_existing) {
-        # Preserve existing TRUE values, only add new ones
-        needs_amendment | date_issue
+        # Always recalculate daterange issue, but preserve non-daterange issues
+        has_other_issues | date_issue
       } else {
         # Full replacement (for initial import)
         date_issue
       }
     ) %>%
-    select(-date_issue)
+    select(-date_issue, -has_other_issues)
 }
 
 build_long_budget <- function(posts_tbl, budget_start, budget_end, salaries_lookup = data.frame(), inflation_pct = 0, salaries_tbl = NULL) {
@@ -1841,7 +1936,7 @@ ui <- fluidPage(
       dateRangeInput("post_date_range", required_label("Date range"), start = NA, end = NA, width = "100%"),
       numericInput("fte", "Full-time equivalent (FTE) / year", value = NA_real_, min = 0, step = 0.1),
       selectInput("value_mode", "How should amount be defined?", choices = c("Formula" = "function", "Variable" = "variable"), selected = "function"),
-      radioButtons("value_unit", "Input amount per", choices = c("Month" = "month", "Year" = "year"), selected = "month", inline = TRUE),
+      uiOutput("value_unit_ui"),
       uiOutput("value_inputs_ui"),
       textAreaInput("note", "Note", value = "", rows = 2),
       selectInput("application_status", required_label("Application status"),
@@ -2554,7 +2649,7 @@ server <- function(input, output, session) {
     updateDateRangeInput(session, "budget_range", start = input$budget_start, end = input$budget_end)
     updateDateRangeInput(session, "filter_month_range", start = input$budget_start, end = input$budget_end)
 
-    rv$posts <- flag_posts(rv$posts, input$budget_start, input$budget_end, preserve_existing = TRUE)
+    rv$posts <- flag_posts(rv$posts, input$budget_start, input$budget_end, preserve_existing = TRUE, post_import_issues = rv$post_import_issues)
   }, ignoreInit = FALSE)
 
   # Issue #3: Workbook name validation and live updates while typing
@@ -3124,6 +3219,25 @@ server <- function(input, output, session) {
   observeEvent(input$value_mode,       { rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L }, ignoreInit = TRUE)
   observeEvent(input$value_unit,       { rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L }, ignoreInit = TRUE)
   observeEvent(input$post_date_range,  { rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L }, ignoreInit = TRUE)
+
+  # Render unit radio buttons - only allow "Month" for formula mode
+  output$value_unit_ui <- renderUI({
+    mode <- input$value_mode
+    if (mode == "function") {
+      # Formula mode: only allow monthly
+      radioButtons("value_unit", "Input amount per", choices = c("Month" = "month"), selected = "month", inline = TRUE)
+    } else {
+      # Variable mode: allow both
+      radioButtons("value_unit", "Input amount per", choices = c("Month" = "month", "Year" = "year"), selected = "month", inline = TRUE)
+    }
+  })
+
+  # When mode changes to "function", ensure value_unit is set to "month"
+  observeEvent(input$value_mode, {
+    if (input$value_mode == "function") {
+      updateRadioButtons(session, "value_unit", selected = "month")
+    }
+  }, ignoreInit = TRUE)
 
   output$value_inputs_ui <- renderUI({
     rv$value_inputs_refresh  # single reactive dependency
@@ -4203,7 +4317,7 @@ server <- function(input, output, session) {
         set_success(paste("Post updated:", row_to_save$post_name, "in", row_to_save$center))
       }
 
-      rv$posts <- flag_posts(rv$posts, input$budget_start, input$budget_end, preserve_existing = TRUE)
+      rv$posts <- flag_posts(rv$posts, input$budget_start, input$budget_end, preserve_existing = TRUE, post_import_issues = rv$post_import_issues)
       
       # Re-validate the saved post against current registries and check if it still needs amendment
       saved_post <- rv$posts %>% filter(id == row_to_save$id)
@@ -4227,10 +4341,8 @@ server <- function(input, output, session) {
           rv$posts <- rv$posts %>%
             mutate(needs_amendment = if_else(id == row_to_save$id, TRUE, needs_amendment))
         } else {
-          # No more issues - clear from post_import_issues and amendment
+          # No import issues - but keep needs_amendment if it was set by flag_posts() due to date range
           rv$post_import_issues <- rv$post_import_issues %>% filter(id != row_to_save$id)
-          rv$posts <- rv$posts %>%
-            mutate(needs_amendment = if_else(id == row_to_save$id, FALSE, needs_amendment))
         }
       }
       
@@ -4275,7 +4387,7 @@ server <- function(input, output, session) {
       set_success(paste("Post updated with override:", row_to_save$post_name, "in", row_to_save$center))
     }
 
-    rv$posts <- flag_posts(rv$posts, input$budget_start, input$budget_end, preserve_existing = TRUE)
+    rv$posts <- flag_posts(rv$posts, input$budget_start, input$budget_end, preserve_existing = TRUE, post_import_issues = rv$post_import_issues)
     rv$pending_post_row <- NULL
     reset_form()
   })
@@ -4400,11 +4512,32 @@ server <- function(input, output, session) {
       return(ggplotly(p, tooltip = "none"))
     }
 
-    # Color palette for categories
-    unique_cats <- sort(unique(viz_data$category))
+    # Color palette for categories - using RColorBrewer Set2
+    # Order categories by their total cumulative sum (largest at bottom)
+    # Use the "All sites" facet to get true totals, or sum across sites if it doesn't exist
+    all_sites_data <- viz_data %>% filter(facet == "All sites")
+    if (nrow(all_sites_data) > 0) {
+      # Use all_sites aggregate - get final cumulative value for each category
+      cat_totals <- all_sites_data %>%
+        group_by(category) %>%
+        summarise(total_value = max(value, na.rm = TRUE), .groups = "drop") %>%
+        arrange(desc(total_value))
+    } else {
+      # Fall back to summing across all data
+      cat_totals <- viz_data %>%
+        group_by(category) %>%
+        summarise(total_value = sum(value, na.rm = TRUE), .groups = "drop") %>%
+        arrange(desc(total_value))
+    }
+    unique_cats <- cat_totals$category
     n_cats <- length(unique_cats)
-    color_palette <- colorRampPalette(c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"))(n_cats)
-    names(color_palette) <- unique_cats
+    # Set2 has colors: #66C2A5, #FC8D62, #8DA0CB, #E78AC3, #A6D854, #FFD92F, #E5C494, #B3B3B3
+    set2_colors <- c("#66C2A5", "#FC8D62", "#8DA0CB", "#E78AC3", "#A6D854", "#FFD92F", "#E5C494", "#B3B3B3")
+    color_palette <- if (n_cats <= 8) {
+      setNames(set2_colors[1:n_cats], unique_cats)
+    } else {
+      setNames(colorRampPalette(set2_colors)(n_cats), unique_cats)
+    }
 
     facets <- levels(viz_data$facet)
 
@@ -4442,8 +4575,8 @@ server <- function(input, output, session) {
         return(plot_ly() %>% add_trace(y = numeric(), name = f))
       }
       
-      # Only include categories present in this facet
-      present_cats <- sort(unique(facet_data$category))
+      # Only include categories present in this facet, in the ordered sequence
+      present_cats <- unique_cats[unique_cats %in% facet_data$category]
       
       p <- plot_ly()
       for (cat_name in present_cats) {
@@ -4574,6 +4707,7 @@ server <- function(input, output, session) {
         tags$li(tags$b("n"), " - required vector length for the selected input period (months or years)"),
         tags$li(tags$b("FTE"), " - FTE for this post, as input by user"),
         tags$li(tags$b("fte(site)"), " - function returning total number of FTEs within each chosen period (month, year). By default sums across all positions within the current post's site, but this can be changed with the site argument; e.g., fte(site = 'Main'), fte(site = all_sites)."),
+        tags$li(tags$b("sum_total(site)"), " - function returning sum of all amounts across posts within each chosen period (month, year). By default sums across all posts in the current post's site, but this can be changed with the site argument; e.g., sum_total(site = 'Main'), sum_total(site = all_sites)."),
         tags$li(tags$b("this_site"), " - string, the current post's site name"),
         tags$li(tags$b("all_sites"), " - vector of all site names in the budget"),
         tags$li(tags$b("inflation_factors"), " - vector of inflation multipliers for each period (month or year, depending on post's period type)"),
@@ -4981,7 +5115,7 @@ server <- function(input, output, session) {
       
       rv$inactive_posts <- previously_inactive
       rv$posts <- all_imported_posts
-      rv$posts <- flag_posts(rv$posts, as.Date(start_val), as.Date(end_val), preserve_existing = TRUE)
+      rv$posts <- flag_posts(rv$posts, as.Date(start_val), as.Date(end_val), preserve_existing = TRUE, post_import_issues = rv$post_import_issues)
       rv$salaries <- salaries_parsed
       rv$next_salary_id <- ifelse(nrow(salaries_parsed), max(salaries_parsed$id, na.rm = TRUE) + 1L, 1L)
       
