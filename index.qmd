@@ -1940,7 +1940,7 @@ ui <- fluidPage(
                   selected = "Applied for"),
       tags$div(style = "font-size:0.8em;color:#b00020;margin-top:-4px;", "* = required"),
       fluidRow(
-        column(12, actionButton("add_or_update", "Add budget post", class = "btn-success", style = "width: 100%;"))
+        column(12, uiOutput("add_or_update_button"))
       ),
       uiOutput("form_error"),
       uiOutput("success_feedback")
@@ -2160,6 +2160,16 @@ server <- function(input, output, session) {
     variable_defaults = numeric(),
     constant_expr_draft = "0",
     function_expr_draft = character(),
+    post_name_draft = "",
+    center_draft = "",
+    category_draft = "",
+    start_date_draft = as.Date(NA),
+    end_date_draft = as.Date(NA),
+    fte_draft = NA_real_,
+    value_mode_draft = "function",
+    value_unit_draft = "month",
+    application_status_draft = "Applied for",
+    note_draft = "",
     value_inputs_refresh = 0L,
     form_error_text = NULL,
     form_error_at = NULL,
@@ -2216,11 +2226,22 @@ server <- function(input, output, session) {
     rv$variable_defaults <- numeric()
     rv$constant_expr_draft <- "0"
     rv$function_expr_draft <- ""
-    rv$sum_multiplier_draft <- "1"
-    rv$sum_sites_draft <- character()
-    rv$sum_statuses_draft <- character()
-    rv$sum_posts_draft <- character()
+    rv$post_name_draft <- ""
+    rv$center_draft <- ""
+    rv$category_draft <- ""
+    rv$start_date_draft <- as.Date(NA)
+    rv$end_date_draft <- as.Date(NA)
+    rv$fte_draft <- NA_real_
+    rv$value_mode_draft <- "function"
+    rv$value_unit_draft <- "month"
+    rv$application_status_draft <- "Applied for"
+    rv$note_draft <- ""
+    rv$sum_multiplier_draft <- NULL
+    rv$sum_sites_draft <- NULL
+    rv$sum_statuses_draft <- NULL
+    rv$sum_posts_draft <- NULL
     rv$amend_fields <- character(0)
+    # Clear all form inputs to blank/default state
     updateSelectizeInput(session, "template_name", selected = "")
     updateTextInput(session, "post_name", value = "")
     updateSelectInput(session, "center", selected = "")
@@ -2230,18 +2251,12 @@ server <- function(input, output, session) {
     updateSelectInput(session, "value_mode", selected = "function")
     updateRadioButtons(session, "value_unit", selected = "month")
     updateTextInput(session, "function_expr", value = "")
-    updateTextInput(session, "sum_multiplier", value = "1")
-    # For sum mode, apply smart defaults for new posts
-    updateSelectizeInput(session, "sum_sites", selected = input$center %||% character())
-    updateSelectizeInput(session, "sum_statuses", selected = "Applied for")
+    updateTextInput(session, "sum_multiplier", value = "")
+    updateSelectizeInput(session, "sum_sites", selected = character())
+    updateSelectizeInput(session, "sum_statuses", selected = character())
     updateSelectizeInput(session, "sum_posts", selected = character())
     updateTextAreaInput(session, "note", value = "")
     updateSelectInput(session, "application_status", selected = "Applied for")
-    # Reset draft RVs so renderUI falls back to input defaults
-    rv$sum_multiplier_draft <- NULL
-    rv$sum_sites_draft <- NULL
-    rv$sum_statuses_draft <- NULL
-    rv$sum_posts_draft <- NULL
     rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L
     refresh_post_field_labels()
   }
@@ -2249,6 +2264,17 @@ server <- function(input, output, session) {
   output$budget_period_error <- renderUI({
     if (is.null(rv$budget_error_text)) return(NULL)
     tags$div(class = "inline-error", rv$budget_error_text)
+  })
+
+  # Initialize form inputs once on page load (fires once when value_mode first becomes non-NULL)
+  observeEvent(input$value_mode, {
+    reset_form()
+  }, once = TRUE, ignoreInit = FALSE)
+
+  # Render button with dynamic text based on edit mode
+  output$add_or_update_button <- renderUI({
+    button_text <- if (is.na(rv$editing_id)) "Add budget post" else "Save edit"
+    actionButton("add_or_update", button_text, class = "btn-success", style = "width: 100%;")
   })
 
   output$workbook_name_error <- renderUI({
@@ -4183,6 +4209,45 @@ server <- function(input, output, session) {
     rv$function_expr_draft <- input$function_expr
   }, ignoreInit = TRUE)
 
+  observeEvent(input$post_name, {
+    rv$post_name_draft <- input$post_name
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$center, {
+    rv$center_draft <- trimws(input$center %||% "")
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$category, {
+    rv$category_draft <- input$category %||% ""
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$post_date_range, {
+    if (!is.null(input$post_date_range) && length(input$post_date_range) == 2) {
+      rv$start_date_draft <- as.Date(input$post_date_range[1])
+      rv$end_date_draft   <- as.Date(input$post_date_range[2])
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$fte, {
+    rv$fte_draft <- suppressWarnings(as.numeric(input$fte))
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$value_mode, {
+    rv$value_mode_draft <- input$value_mode
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$value_unit, {
+    rv$value_unit_draft <- input$value_unit
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$application_status, {
+    rv$application_status_draft <- input$application_status %||% ""
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$note, {
+    rv$note_draft <- input$note %||% ""
+  }, ignoreInit = TRUE)
+
   observeEvent(input$sum_multiplier, {
     rv$sum_multiplier_draft <- input$sum_multiplier
   }, ignoreInit = TRUE)
@@ -4222,56 +4287,66 @@ server <- function(input, output, session) {
 
     rv$editing_id <- sid
     rv$variable_defaults <- unlist(row$value_vector[[1]], use.names = FALSE)
-    rv$constant_expr_draft <- row$constant_expr
-    rv$function_expr_draft <- row$function_expr
+    rv$constant_expr_draft <- as.character(row$constant_expr[[1]] %||% "0")
+    rv$function_expr_draft <- as.character(row$function_expr[[1]] %||% "")
+    rv$post_name_draft <- as.character(row$post_name[[1]] %||% "")
+    rv$center_draft <- as.character(row$center[[1]] %||% "")
+    rv$category_draft <- as.character(row$category[[1]] %||% "")
+    rv$start_date_draft <- as.Date(row$start_date[[1]])
+    rv$end_date_draft <- as.Date(row$end_date[[1]])
+    rv$fte_draft <- as.numeric(row$fte[[1]] %||% NA_real_)
+    rv$value_mode_draft <- as.character(row$value_mode[[1]] %||% "function")
+    rv$value_unit_draft <- as.character(row$value_unit[[1]] %||% "month")
+    rv$application_status_draft <- as.character(row$application_status[[1]] %||% "Applied for")
+    rv$note_draft <- as.character(row$note[[1]] %||% "")
     
     # Load sum mode fields
-    rv$sum_multiplier_draft <- if (!is.null(row$sum_multiplier) && nzchar(as.character(row$sum_multiplier))) {
-      as.character(row$sum_multiplier)
+    rv$sum_multiplier_draft <- if (!is.null(row$sum_multiplier[[1]]) && nzchar(as.character(row$sum_multiplier[[1]] %||% ""))) {
+      as.character(row$sum_multiplier[[1]])
     } else {
       "1"
     }
     
-    rv$sum_sites_draft <- if (!is.null(row$sum_sites) && nzchar(as.character(row$sum_sites))) {
-      strsplit(as.character(row$sum_sites), "||", fixed = TRUE)[[1]]
+    rv$sum_sites_draft <- if (!is.null(row$sum_sites[[1]]) && nzchar(as.character(row$sum_sites[[1]] %||% ""))) {
+      strsplit(as.character(row$sum_sites[[1]]), "||", fixed = TRUE)[[1]]
     } else {
       character()
     }
     
-    rv$sum_statuses_draft <- if (!is.null(row$sum_statuses) && nzchar(as.character(row$sum_statuses))) {
-      strsplit(as.character(row$sum_statuses), "||", fixed = TRUE)[[1]]
+    rv$sum_statuses_draft <- if (!is.null(row$sum_statuses[[1]]) && nzchar(as.character(row$sum_statuses[[1]] %||% ""))) {
+      strsplit(as.character(row$sum_statuses[[1]]), "||", fixed = TRUE)[[1]]
     } else {
       character()
     }
     
-    rv$sum_posts_draft <- if (!is.null(row$sum_posts) && nzchar(as.character(row$sum_posts))) {
-      strsplit(as.character(row$sum_posts), "||", fixed = TRUE)[[1]]
+    rv$sum_posts_draft <- if (!is.null(row$sum_posts[[1]]) && nzchar(as.character(row$sum_posts[[1]] %||% ""))) {
+      strsplit(as.character(row$sum_posts[[1]]), "||", fixed = TRUE)[[1]]
     } else {
       character()
     }
 
-    updateTextInput(session, "post_name", value = row$post_name)
-    updateSelectInput(session, "center", selected = row$center)
-    updateSelectInput(session, "category", selected = row$category)
-    updateDateRangeInput(session, "post_date_range", start = row$start_date, end = row$end_date)
-    updateNumericInput(session, "fte", value = row$fte)
-    selected_mode <- if (identical(row$value_mode, "variable")) {
+    updateTextInput(session, "post_name", value = row$post_name[[1]])
+    updateSelectInput(session, "center", selected = row$center[[1]])
+    updateSelectInput(session, "category", selected = row$category[[1]])
+    updateDateRangeInput(session, "post_date_range", start = row$start_date[[1]], end = row$end_date[[1]])
+    updateNumericInput(session, "fte", value = row$fte[[1]])
+    selected_mode <- if (identical(row$value_mode[[1]], "variable")) {
       "variable"
-    } else if (identical(row$value_mode, "sum")) {
+    } else if (identical(row$value_mode[[1]], "sum")) {
       "sum"
     } else {
       "function"
     }
     updateSelectInput(session, "value_mode", selected = selected_mode)
-    updateRadioButtons(session, "value_unit", selected = row$value_unit)
-    updateTextInput(session, "function_expr", value = row$function_expr)
+    updateRadioButtons(session, "value_unit", selected = row$value_unit[[1]])
+    updateTextInput(session, "function_expr", value = row$function_expr[[1]])
     updateTextInput(session, "sum_multiplier", value = rv$sum_multiplier_draft)
     updateSelectizeInput(session, "sum_sites", selected = rv$sum_sites_draft)
     updateSelectizeInput(session, "sum_statuses", selected = rv$sum_statuses_draft)
     updateSelectizeInput(session, "sum_posts", selected = rv$sum_posts_draft)
-    updateTextAreaInput(session, "note", value = row$note)
+    updateTextAreaInput(session, "note", value = row$note[[1]])
     updateSelectInput(session, "application_status",
-      selected = if (!is.null(row$application_status) && nzchar(row$application_status)) row$application_status else "Applied for")
+      selected = if (!is.null(row$application_status[[1]]) && nzchar(row$application_status[[1]])) row$application_status[[1]] else "Applied for")
 
     # Store amendment reasons for display
     rv$current_post_amendment_reason <- NULL
@@ -4359,14 +4434,30 @@ server <- function(input, output, session) {
     rv$export_error_text <- NULL
     rv$pending_post_row <- NULL
 
-    range_start <- if (!is.null(input$post_date_range) && length(input$post_date_range) == 2) as.Date(input$post_date_range[1]) else as.Date(NA)
-    range_end <- if (!is.null(input$post_date_range) && length(input$post_date_range) == 2) as.Date(input$post_date_range[2]) else as.Date(NA)
+    is_editing <- !is.na(rv$editing_id)
+
+    # When editing, always use draft RVs (synchronously set) instead of async form inputs.
+    # Form inputs lag behind because reset_form() + updateXxx() are async; drafts are set synchronously.
+    val_post_name   <- if (is_editing) rv$post_name_draft          else input$post_name
+    val_center      <- if (is_editing) rv$center_draft             else trimws(input$center %||% "")
+    val_category    <- if (is_editing) rv$category_draft           else input$category
+    val_app_status  <- if (is_editing) rv$application_status_draft else (input$application_status %||% "")
+    val_start_date  <- if (is_editing) rv$start_date_draft         else {
+      if (!is.null(input$post_date_range) && length(input$post_date_range) == 2) as.Date(input$post_date_range[1]) else as.Date(NA)
+    }
+    val_end_date    <- if (is_editing) rv$end_date_draft           else {
+      if (!is.null(input$post_date_range) && length(input$post_date_range) == 2) as.Date(input$post_date_range[2]) else as.Date(NA)
+    }
+
+    # Keep range_start/end for backwards-compat use when adding (new posts)
+    range_start <- val_start_date
+    range_end   <- val_end_date
 
     missing_fields <- c()
-    if (is.null(input$post_name) || !nzchar(trimws(input$post_name))) missing_fields <- c(missing_fields, "Post name")
-    if (is.null(input$center) || !nzchar(trimws(input$center))) missing_fields <- c(missing_fields, "Site")
-    if (is.null(input$category) || !nzchar(trimws(input$category))) missing_fields <- c(missing_fields, "Category")
-    if (is.null(input$application_status) || !nzchar(trimws(input$application_status))) missing_fields <- c(missing_fields, "Application status")
+    if (is.null(val_post_name)  || !nzchar(trimws(val_post_name)))  missing_fields <- c(missing_fields, "Post name")
+    if (is.null(val_center)     || !nzchar(trimws(val_center)))     missing_fields <- c(missing_fields, "Site")
+    if (is.null(val_category)   || !nzchar(trimws(val_category)))   missing_fields <- c(missing_fields, "Category")
+    if (is.null(val_app_status) || !nzchar(trimws(val_app_status))) missing_fields <- c(missing_fields, "Application status")
     if (is.na(range_start) || is.na(range_end)) missing_fields <- c(missing_fields, "Date range")
 
     if (length(missing_fields) > 0) {
@@ -4380,7 +4471,7 @@ server <- function(input, output, session) {
     }
 
     vec <- numeric()
-    if (input$value_mode == "variable") {
+    if (isTRUE(if (is_editing) rv$value_mode_draft == "variable" else input$value_mode == "variable")) {
       n_vals <- required_value_count()
       vec <- map_dbl(seq_len(n_vals), function(i) {
         as.numeric(input[[paste0("var_value_", i)]])
@@ -4388,25 +4479,26 @@ server <- function(input, output, session) {
     }
 
     new_row <- tibble(
-      id = if (is.na(rv$editing_id)) rv$next_id else rv$editing_id,
-      center = trimws(input$center),
-      post_name = input$post_name,
-      category = input$category,
-      start_date = range_start,
-      end_date = range_end,
-      fte = suppressWarnings(as.numeric(input$fte)),
-      value_mode = input$value_mode,
-      value_unit = input$value_unit,
+      id = if (is_editing) rv$editing_id else rv$next_id,
+      center = if (is_editing) val_center else trimws(input$center),
+      post_name = if (is_editing) val_post_name else input$post_name,
+      category = if (is_editing) val_category else input$category,
+      start_date = if (is_editing) val_start_date else range_start,
+      end_date = if (is_editing) val_end_date else range_end,
+      fte = if (is_editing) rv$fte_draft else suppressWarnings(as.numeric(input$fte)),
+      value_mode = if (is_editing) rv$value_mode_draft else input$value_mode,
+      value_unit = if (is_editing) rv$value_unit_draft else input$value_unit,
       constant_expr = rv$constant_expr_draft,
-      function_expr = ifelse(is.null(input$function_expr), rv$function_expr_draft, input$function_expr),
+      function_expr = ifelse(is.null(input$function_expr) || !nzchar(input$function_expr), rv$function_expr_draft, input$function_expr),
       value_vector = list(vec),
-      sum_multiplier = ifelse(is.null(input$sum_multiplier), rv$sum_multiplier_draft, input$sum_multiplier),
-      sum_sites = ifelse(is.null(input$sum_sites), rv$sum_sites_draft, paste(input$sum_sites, collapse = "||")),
-      sum_statuses = ifelse(is.null(input$sum_statuses), rv$sum_statuses_draft, paste(input$sum_statuses, collapse = "||")),
-      sum_posts = ifelse(is.null(input$sum_posts), rv$sum_posts_draft, paste(input$sum_posts, collapse = "||")),
-      note = input$note,
+      sum_multiplier = if (!is.null(input$sum_multiplier) && nzchar(input$sum_multiplier)) input$sum_multiplier else (rv$sum_multiplier_draft %||% "1"),
+      sum_sites = if (!is.null(input$sum_sites) && length(input$sum_sites) > 0) paste(input$sum_sites, collapse = "||") else if (length(rv$sum_sites_draft) > 0) paste(rv$sum_sites_draft, collapse = "||") else "",
+      sum_statuses = if (!is.null(input$sum_statuses) && length(input$sum_statuses) > 0) paste(input$sum_statuses, collapse = "||") else if (length(rv$sum_statuses_draft) > 0) paste(rv$sum_statuses_draft, collapse = "||") else "",
+      sum_posts = if (!is.null(input$sum_posts) && length(input$sum_posts) > 0) paste(input$sum_posts, collapse = "||") else if (length(rv$sum_posts_draft) > 0) paste(rv$sum_posts_draft, collapse = "||") else "",
+      note = if (is_editing) rv$note_draft else input$note,
       needs_amendment = FALSE,
-      application_status = if (!is.null(input$application_status)) input$application_status else "Applied for"
+      application_status = if (is_editing) val_app_status else (if (!is.null(input$application_status)) input$application_status else "Applied for"),
+      import_issues = ""
     )
 
     dup <- rv$posts %>%
@@ -4422,7 +4514,7 @@ server <- function(input, output, session) {
     }
 
     category_row <- rv$category_registry %>%
-      filter(!is_deleted, name == input$category) %>%
+      filter(!is_deleted, name == val_category) %>%
       slice(1)
     if (nrow(category_row) != 1) {
       rv$form_error_text <- "Selected category is unavailable. Please choose another category."
@@ -4430,7 +4522,7 @@ server <- function(input, output, session) {
     }
 
     site_row <- rv$site_registry %>%
-      filter(!is_deleted, name == input$center) %>%
+      filter(!is_deleted, name == val_center) %>%
       slice(1)
     if (nrow(site_row) != 1) {
       rv$form_error_text <- "Selected site is unavailable. Please choose another site."
