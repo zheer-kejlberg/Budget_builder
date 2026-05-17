@@ -841,7 +841,9 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
     }
   }
 
-  # Apply inflation flag (post-level checkbox)
+  # Apply inflation flag (post-level checkbox).
+  # At this point values is always monthly (expand_year_values ran above for year-unit posts),
+  # so inflation_month_factors is always the correct multiplier regardless of unit.
   if (isTRUE(post_row$apply_inflation_flag)) {
     values <- values * inflation_month_factors
   }
