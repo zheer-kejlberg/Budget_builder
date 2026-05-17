@@ -5518,21 +5518,25 @@ server <- function(input, output, session) {
       rv$next_id <- ifelse(nrow(posts_parsed), max(posts_parsed$id, na.rm = TRUE) + 1L, 1L)
       
       # Validate imported posts for issues
-      posts_with_validation <- map_dfr(seq_len(nrow(posts_parsed)), function(i) {
-        post <- posts_parsed[i, ]
-        validation <- check_import_post_issues(
-          post, 
-          posts_parsed[-i, ], 
-          make_salary_lookup(salaries_parsed), 
-          as.numeric(inflation_val),
-          salaries_tbl = salaries_parsed,
-          site_registry = site_registry_restored,
-          category_registry = category_registry_restored
-        )
-        post$import_issues <- if (validation$has_issues) validation$issues_text else NA_character_
-        post$needs_amendment <- validation$has_issues
-        post
-      })
+      if (nrow(posts_parsed) > 0) {
+        posts_with_validation <- map_dfr(seq_len(nrow(posts_parsed)), function(i) {
+          post <- posts_parsed[i, ]
+          validation <- check_import_post_issues(
+            post, 
+            posts_parsed[-i, ], 
+            make_salary_lookup(salaries_parsed), 
+            as.numeric(inflation_val),
+            salaries_tbl = salaries_parsed,
+            site_registry = site_registry_restored,
+            category_registry = category_registry_restored
+          )
+          post$import_issues <- if (validation$has_issues) validation$issues_text else NA_character_
+          post$needs_amendment <- validation$has_issues
+          post
+        })
+      } else {
+        posts_with_validation <- make_empty_posts() %>% mutate(import_issues = NA_character_)
+      }
       
       # Posts with import issues stay active but marked for amendment
       all_imported_posts <- posts_with_validation %>% select(-import_issues)
