@@ -122,19 +122,19 @@ make_empty_salaries <- function() {
 make_default_salaries <- function() {
   ry  <- calc_salary_fields(12000,  "month", "percentage",  0,     0,    wage_supplement = 0, holiday_rate_pct = 0,    subtract_holiday = FALSE)
   cr  <- calc_salary_fields(48500,  "month", "percentage", 19.36, 33.3, wage_supplement = 0, holiday_rate_pct = 12.5, subtract_holiday = TRUE)
-  phd <- calc_salary_fields(503543, "year",  "percentage", 17.1,  0,    wage_supplement = 0, holiday_rate_pct = 12.5, subtract_holiday = TRUE)
+  phd <- calc_salary_fields(439707, "year",  "percentage", 18.07,  33.3,    wage_supplement = 18849.77, holiday_rate_pct = 0, subtract_holiday = FALSE)
   tibble(
     id                                = 1L:3L,
     identifier                        = c("research_year", "clinical_researcher", "phd_student"),
     name                              = c("Research year", "Clinical Researcher", "PhD student"),
     unit                              = c("month", "month", "year"),
-    base_salary                       = c(12000, 48500, 503543),
+    base_salary                       = c(12000, 48500, 439707),
     pension_mode                      = c("percentage", "percentage", "percentage"),
-    pension_value                     = c(0, 19.36, 17.1),
-    own_pension_pct                   = c(0, 33.3, 0),
-    wage_supplement                   = c(0, 0, 0),
-    holiday_rate                      = c(0, 12.5, 12.5),
-    subtract_holiday                  = c(FALSE, TRUE, TRUE),
+    pension_value                     = c(0, 19.36, 18.07),
+    own_pension_pct                   = c(0, 33.3, 33.3),
+    wage_supplement                   = c(0, 0, 18849.77),
+    holiday_rate                      = c(0, 12.5, 0),
+    subtract_holiday                  = c(FALSE, TRUE, FALSE),
     base_salary_monthly               = c(ry$base_salary_monthly,              cr$base_salary_monthly,              phd$base_salary_monthly),
     wage_supplement_monthly           = c(ry$wage_supplement_monthly,          cr$wage_supplement_monthly,          phd$wage_supplement_monthly),
     pension_amount_monthly            = c(ry$pension_amount_monthly,           cr$pension_amount_monthly,           phd$pension_amount_monthly),
@@ -491,9 +491,9 @@ make_default_templates <- function() {
     category = c("", "Salary for research year (RY)", "Salary Ph.D. students"),
     center = rep("", 3),
     mode = c("function", "function", "function"),
-    unit = c("month", "year", "month"),
+    unit = c("month", "month", "month"),
     constant_expr = rep("0", 3),
-    function_expr = c("rep(0, n)", "research_year$total_y", "apply_inflation_month(phd_student$total_m)"),
+    function_expr = c("apply_inflation(clinical_researcher$total_m)*FTE", "research_year$total_y", "apply_inflation(phd_student$total_m)"),
     fte = c(NA_real_, 1, 1),
     note = c("", "", ""),
     values = list(numeric(), numeric(), numeric()),
