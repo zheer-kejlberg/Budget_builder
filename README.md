@@ -47,12 +47,12 @@ Any defaults left empty won't override the post form values.
 #### 3. New Salary Identifier Syntax (Issue #4)
 **Old syntax (no longer supported):**
 ```r
-salaries[s1, "total_m"]
+salaries[s1, "total"]
 ```
 
 **New syntax (use this in formulas):**
 ```r
-s1$total_m
+s1$total
 ```
 
 **Identifier generation** is automatic based on salary names:
@@ -61,17 +61,19 @@ s1$total_m
 - Duplicates get numeric suffixes: `phd_student_1`, `phd_student_2`
 
 Available fields for each salary identifier:
-- `base_m`, `base_y` — Base salary
-- `pension_m`, `pension_y` — Pension amount
-- `own_pension_m`, `own_pension_y` — Employee's pension contribution
-- `holiday_base_m`, `holiday_base_y` — Holiday allowance base
-- `holiday_m`, `holiday_y` — Holiday allowance
-- `total_m`, `total_y` — Total salary
-- `total_deducted_m`, `total_deducted_y` — Total salary with holiday deduction
+- `base` — Base salary (monthly)
+- `pension` — Pension amount (monthly)
+- `own_pension` — Employee's pension contribution (monthly)
+- `holiday_base` — Holiday allowance base (monthly)
+- `holiday` — Holiday allowance (monthly)
+- `total_plus_holiday` — Total including holiday allowance (monthly)
+- `total_plus_holiday_y` — Total including holiday allowance (yearly)
+- `total` — Total salary (monthly, holiday-absence deducted if 'Subtract holiday' is on)
+- `total_y` — Total salary (yearly)
 
 **Example formula:**
 ```r
-apply_inflation_month(s1$total_m) + apply_inflation_month(s2$total_m)
+apply_inflation(s1$total) + apply_inflation(s2$total)
 ```
 
 ## Getting Started
@@ -186,9 +188,8 @@ In amount formulas, you have access to:
 - `inflation_pct` — Yearly inflation percentage
 - `inflation_month_factors` — Month-wise inflation multipliers
 - `inflation_year_factors` — Year-wise inflation multipliers
-- `apply_inflation_month(value)` — Apply monthly inflation to a base value
-- `apply_inflation_year(value)` — Apply yearly inflation to a base value
-- Salary identifiers (e.g., `s1$total_m`, `phd_student$total_y`)
+- `apply_inflation(value)` — Apply calendar-year inflation to a base value (returns month or year length vector)
+- Salary identifiers (e.g., `s1$total`, `phd_student$total_y`)
 
 ## Export Format
 

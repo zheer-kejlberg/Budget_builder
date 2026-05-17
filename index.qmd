@@ -83,7 +83,8 @@ make_empty_posts <- function() {
     note = character(),
     needs_amendment = logical(),
     application_status = character(),
-    import_issues = character()
+    import_issues = character(),
+    apply_inflation_flag = logical()
   )
 }
 
@@ -593,7 +594,8 @@ check_import_post_issues <- function(post_row, existing_posts, salaries_lookup =
   }
 
   # Check if formula evaluates without error
-  if (post_row$value_mode == "function" && nzchar(trimws(post_row$function_expr))) {
+  if (post_row$value_mode %in% c("function", "salary", "numeric", "sum") &&
+      !(post_row$value_mode == "function" && !nzchar(trimws(post_row$function_expr)))) {
     fte_monthly_total <- rep(NA_real_, 12)
     # Combine existing_posts with current post for context (excluding current post to avoid issues)
     all_posts_for_eval <- bind_rows(existing_posts, post_row)
@@ -681,7 +683,16 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
     this_site = current_site,
     all_sites = all_sites,
     fte = function(site = current_site) {
-      get_site_fte(site)
+      monthly_vals <- get_site_fte(site)
+      if (unit == "year") {
+        vapply(seq_len(n_years), function(i) {
+          idx_start <- (i - 1) * 12 + 1
+          idx_end <- min(i * 12, n_months)
+          sum(monthly_vals[idx_start:idx_end], na.rm = TRUE)
+        }, numeric(1))
+      } else {
+        monthly_vals
+      }
     },
     inflation_factors = if (unit == "year") inflation_year_factors else inflation_month_factors,
     apply_inflation = function(base_value) {
@@ -703,12 +714,44 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
   }
 
   if (mode == "constant") {
+    # Legacy mode — treated as numeric single-value
     constant_expr_safe <- if (is.null(post_row$constant_expr) || !nzchar(trimws(post_row$constant_expr))) "0" else post_row$constant_expr
     scalar <- safe_eval_expr(constant_expr_safe, fte = fte, n = n_months, extra_env = extra_env)
     if (length(scalar) != 1L || !is.numeric(scalar) || is.na(scalar)) {
       stop("Constant amount expression must resolve to one numeric value.", call. = FALSE)
     }
     values <- rep(as.numeric(scalar), if (unit == "month") n_months else n_years)
+  } else if (mode == "numeric") {
+    vec <- unlist(post_row$value_vector, use.names = FALSE)
+    if (length(vec) == 0) {
+      # Single-value sub-mode: use constant_expr
+      constant_expr_safe <- if (is.null(post_row$constant_expr) || !nzchar(trimws(post_row$constant_expr))) "0" else post_row$constant_expr
+      scalar <- safe_eval_expr(constant_expr_safe, fte = fte, n = n_months, extra_env = extra_env)
+      if (length(scalar) != 1L || !is.numeric(scalar) || is.na(scalar)) {
+        stop("Numeric (single) amount must resolve to one numeric value.", call. = FALSE)
+      }
+      values <- rep(as.numeric(scalar), if (unit == "month") n_months else n_years)
+    } else {
+      # Multi-value sub-mode: use value_vector
+      values <- vec
+      if (!is.numeric(values)) {
+        stop("Numeric (multi) amounts must be numeric.", call. = FALSE)
+      }
+    }
+  } else if (mode == "salary") {
+    # Salary mode: look up salary by identifier stored in function_expr
+    salary_id <- as.character(post_row$function_expr[[1]])
+    if (is.null(salary_id) || !nzchar(trimws(salary_id))) {
+      stop("Salary mode requires a salary calculation to be selected.", call. = FALSE)
+    }
+    sal_obj <- salary_objs[[salary_id]]
+    if (is.null(sal_obj)) {
+      stop(paste0("Salary identifier '", salary_id, "' not found."), call. = FALSE)
+    }
+    sal_value <- if (unit == "year") sal_obj$total_y else sal_obj$total
+    fte_val <- if (is.na(fte)) 1 else as.numeric(fte)
+    n_needed <- if (unit == "year") n_years else n_months
+    values <- rep(as.numeric(sal_value) * fte_val, n_needed)
   } else if (mode == "function") {
     function_expr_safe <- if (is.null(post_row$function_expr) || !nzchar(trimws(post_row$function_expr))) "rep(0, n)" else post_row$function_expr
     n_values <- if (unit == "year") n_years else n_months
@@ -793,7 +836,7 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
     }
     
   } else {
-    # Variable mode
+    # Legacy variable mode
     values <- unlist(post_row$value_vector, use.names = FALSE)
     if (!is.numeric(values)) {
       stop("Variable amounts must be numeric.", call. = FALSE)
@@ -825,6 +868,11 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
         call. = FALSE
       )
     }
+  }
+
+  # Apply inflation flag (post-level checkbox)
+  if (isTRUE(post_row$apply_inflation_flag)) {
+    values <- values * inflation_month_factors
   }
 
   if (any(is.na(values))) {
@@ -947,12 +995,14 @@ serialize_inactive_posts <- function(posts_tbl) {
   
   posts_tbl %>%
     select(id, center, post_name, category, start_date, end_date, fte, value_mode, value_unit, 
-           constant_expr, function_expr, value_vector, note, needs_amendment, application_status, import_issues) %>%
+           constant_expr, function_expr, value_vector, note, needs_amendment, application_status, import_issues,
+           apply_inflation_flag) %>%
     mutate(
       start_date = as.character(start_date),
       end_date = as.character(end_date),
       value_vector = map_chr(value_vector, ~ paste(.x, collapse = ";")),
-      import_issues = if_else(is.na(import_issues), "", import_issues)
+      import_issues = if_else(is.na(import_issues), "", import_issues),
+      apply_inflation_flag = as.logical(apply_inflation_flag)
     )
 }
 
@@ -977,6 +1027,11 @@ parse_inactive_posts <- function(posts_tbl) {
     }
   }
 
+  # Add apply_inflation_flag if missing (backward compatibility)
+  if (!"apply_inflation_flag" %in% names(posts_tbl)) {
+    posts_tbl$apply_inflation_flag <- FALSE
+  }
+
   posts_tbl %>%
     mutate(
       start_date = as.Date(start_date),
@@ -990,7 +1045,8 @@ parse_inactive_posts <- function(posts_tbl) {
         v <- as.character(application_status)
         ifelse(is.na(v) | !nzchar(v), "Applied for", v)
       },
-      import_issues = if_else(is.na(import_issues) | import_issues == "", NA_character_, import_issues)
+      import_issues = if_else(is.na(import_issues) | import_issues == "", NA_character_, import_issues),
+      apply_inflation_flag = as.logical(apply_inflation_flag)
     )
 }
 
@@ -1029,6 +1085,11 @@ parse_posts <- function(posts_tbl) {
     }
   }
 
+  # Add apply_inflation_flag if missing (backward compatibility)
+  if (!"apply_inflation_flag" %in% names(posts_tbl)) {
+    posts_tbl$apply_inflation_flag <- FALSE
+  }
+
   posts_tbl %>%
     mutate(
       start_date = as.Date(start_date),
@@ -1041,7 +1102,8 @@ parse_posts <- function(posts_tbl) {
       application_status = {
         v <- as.character(application_status)
         ifelse(is.na(v) | !nzchar(v), "Applied for", v)
-      }
+      },
+      apply_inflation_flag = as.logical(apply_inflation_flag)
     )
 }
 
@@ -1930,7 +1992,7 @@ ui <- fluidPage(
       selectInput("category", required_label("Category"), choices = c("", make_default_categories()$name), selected = ""),
       dateRangeInput("post_date_range", required_label("Date range"), start = NA, end = NA, width = "100%"),
       numericInput("fte", "Full-time equivalent (FTE) / year", value = NA_real_, min = 0, step = 0.1),
-      selectInput("value_mode", "How should amount be defined?", choices = c("Formula" = "function", "Variable" = "variable", "Sum of other posts" = "sum"), selected = "function"),
+      selectInput("value_mode", "How should amount be defined?", choices = c("Formula" = "function", "Salary" = "salary", "Numeric" = "numeric", "Sum of other posts" = "sum"), selected = "function"),
       uiOutput("value_unit_ui"),
       uiOutput("value_inputs_ui"),
       textAreaInput("note", "Note", value = "", rows = 2),
@@ -2187,7 +2249,11 @@ server <- function(input, output, session) {
     success_text = NULL,
     success_at = NULL,
     post_import_issues = tibble(id = integer(), import_issues = character()),
-    current_post_amendment_reason = NULL
+    current_post_amendment_reason = NULL,
+    apply_inflation_flag_draft = FALSE,
+    numeric_sub_mode_draft = "single",
+    numeric_single_value_draft = 0,
+    salary_id_draft = ""
   )
 
   show_error_modal <- function(msg) {
@@ -2240,6 +2306,10 @@ server <- function(input, output, session) {
     rv$sum_sites_draft <- NULL
     rv$sum_statuses_draft <- NULL
     rv$sum_posts_draft <- NULL
+    rv$apply_inflation_flag_draft <- FALSE
+    rv$numeric_sub_mode_draft <- "single"
+    rv$numeric_single_value_draft <- 0
+    rv$salary_id_draft <- ""
     rv$amend_fields <- character(0)
     # Clear all form inputs to blank/default state
     updateSelectizeInput(session, "template_name", selected = "")
@@ -2257,6 +2327,7 @@ server <- function(input, output, session) {
     updateSelectizeInput(session, "sum_posts", selected = character())
     updateTextAreaInput(session, "note", value = "")
     updateSelectInput(session, "application_status", selected = "Applied for")
+    updateCheckboxInput(session, "apply_inflation_post", value = FALSE)
     rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L
     refresh_post_field_labels()
   }
@@ -3172,7 +3243,22 @@ server <- function(input, output, session) {
 
     updateSelectInput(session, "center", selected = tpl$center)
     updateSelectInput(session, "category", selected = tpl$category)
-    selected_mode <- if (identical(tpl$mode, "variable")) "variable" else "function"
+    selected_mode <- if (identical(tpl$mode, "variable") || identical(tpl$mode, "constant") || identical(tpl$mode, "numeric")) {
+      "numeric"
+    } else if (identical(tpl$mode, "salary")) {
+      "salary"
+    } else if (identical(tpl$mode, "sum")) {
+      "sum"
+    } else {
+      "function"
+    }
+    if (identical(tpl$mode, "variable")) {
+      rv$numeric_sub_mode_draft <- "multi"
+      rv$variable_defaults <- if (is.null(tpl$values[[1]])) numeric() else as.numeric(tpl$values[[1]])
+    } else if (identical(tpl$mode, "constant") || identical(tpl$mode, "numeric")) {
+      rv$numeric_sub_mode_draft <- "single"
+      rv$numeric_single_value_draft <- suppressWarnings(as.numeric(tpl$constant_expr)) %||% 0
+    }
     updateSelectInput(session, "value_mode", selected = selected_mode)
     updateRadioButtons(session, "value_unit", selected = tpl$unit)
     updateTextInput(session, "function_expr", value = tpl$function_expr)
@@ -3276,21 +3362,21 @@ server <- function(input, output, session) {
   observeEvent(input$value_unit,       { rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L }, ignoreInit = TRUE)
   observeEvent(input$post_date_range,  { rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L }, ignoreInit = TRUE)
 
-  # Render unit radio buttons - only allow "Month" for formula and sum modes
+  # Render unit radio buttons — hidden for formula/sum/salary, shown for numeric
   output$value_unit_ui <- renderUI({
     mode <- input$value_mode
-    if (mode == "function" || mode == "sum") {
-      # Formula and sum modes: only allow monthly
-      radioButtons("value_unit", "Input amount per", choices = c("Month" = "month"), selected = "month", inline = TRUE)
+    if (mode == "function" || mode == "sum" || mode == "salary") {
+      # These modes do not expose a unit selector
+      NULL
     } else {
-      # Variable mode: allow both
-      radioButtons("value_unit", "Input amount per", choices = c("Month" = "month", "Year" = "year"), selected = "month", inline = TRUE)
+      # Numeric mode: allow both month and year
+      radioButtons("value_unit", "Input amount per", choices = c("Month" = "month", "Year" = "year"), selected = isolate(rv$value_unit_draft %||% "month"), inline = TRUE)
     }
   })
 
-  # When mode changes to "function" or "sum", ensure value_unit is set to "month"
+  # When mode changes to "function", "sum", or "salary", ensure value_unit is reset to "month"
   observeEvent(input$value_mode, {
-    if (input$value_mode == "function" || input$value_mode == "sum") {
+    if (input$value_mode %in% c("function", "sum", "salary")) {
       updateRadioButtons(session, "value_unit", selected = "month")
     }
   }, ignoreInit = TRUE)
@@ -3365,10 +3451,24 @@ server <- function(input, output, session) {
       return(NULL)
     }
 
+    inflation_cb <- checkboxInput("apply_inflation_post", "Apply inflation", value = isolate(rv$apply_inflation_flag_draft))
+
     if (mode == "function") {
       tagList(
         textInput("function_expr", amend_label("Formula expression", show_amend = is_amended_field("function_expr")), value = isolate(rv$function_expr_draft), placeholder = "Expression using n, FTE, fte(site), salary_identifier$total and apply_inflation() helper"),
-        actionButton("show_formula_help", "Help: available formula variables")
+        actionButton("show_formula_help", "Help: available formula variables"),
+        inflation_cb
+      )
+    } else if (mode == "salary") {
+      salary_choices <- if (nrow(rv$salaries) > 0) setNames(rv$salaries$identifier, rv$salaries$name) else character(0)
+      current_salary_id <- isolate(rv$salary_id_draft)
+      tagList(
+        if (length(salary_choices) == 0) {
+          helpText("No salary calculations defined. Go to the 'Salary calculations' tab to add one.")
+        } else {
+          selectInput("salary_id_post", "Salary calculation", choices = salary_choices, selected = current_salary_id)
+        },
+        inflation_cb
       )
     } else if (mode == "sum") {
       # Sum of other posts mode - show 4 fields
@@ -3402,28 +3502,66 @@ server <- function(input, output, session) {
                        choices = filtered_posts_list,
                        selected = current_posts,
                        multiple = TRUE,
-                       options = list(plugins = list('remove_button')))
+                       options = list(plugins = list('remove_button'))),
+        inflation_cb
       )
-    } else {
-      # Variable mode
-      n_vals <- isolate(required_value_count())
-      defaults <- isolate(rv$variable_defaults)
-      if (length(defaults) < n_vals) defaults <- c(defaults, rep(0, n_vals - length(defaults)))
+    } else if (mode == "numeric") {
+      sub_mode <- isolate(rv$numeric_sub_mode_draft)
+      unit_val <- isolate(input$value_unit %||% rv$value_unit_draft %||% "month")
 
-      tagList(
-        helpText(paste("Provide", n_vals, ifelse(input$value_unit == "year", "yearly", "monthly"), "amounts.")),
-        lapply(seq_len(n_vals), function(i) {
-          unit_label <- ifelse(input$value_unit == "year", "Year", "Month")
-          numericInput(
-            inputId = paste0("var_value_", i),
-            label = paste(unit_label, i),
-            value = defaults[i],
-            step = 100
-          )
-        })
-      )
+      if (sub_mode == "single") {
+        tagList(
+          radioButtons("numeric_sub_mode", "Input type",
+                       choices = c("Single value" = "single", "Multiple values" = "multi"),
+                       selected = "single", inline = TRUE),
+          numericInput("numeric_single_value", "Amount per period",
+                       value = isolate(rv$numeric_single_value_draft), step = 100, min = 0),
+          inflation_cb
+        )
+      } else {
+        n_vals <- isolate(required_value_count())
+        defaults <- isolate(rv$variable_defaults)
+        if (length(defaults) < n_vals) defaults <- c(defaults, rep(0, n_vals - length(defaults)))
+        tagList(
+          radioButtons("numeric_sub_mode", "Input type",
+                       choices = c("Single value" = "single", "Multiple values" = "multi"),
+                       selected = "multi", inline = TRUE),
+          helpText(paste("Provide", n_vals, ifelse(unit_val == "year", "yearly", "monthly"), "amounts.")),
+          lapply(seq_len(n_vals), function(i) {
+            unit_label <- ifelse(unit_val == "year", "Year", "Month")
+            numericInput(
+              inputId = paste0("var_value_", i),
+              label = paste(unit_label, i),
+              value = defaults[i],
+              step = 100
+            )
+          }),
+          inflation_cb
+        )
+      }
     }
   })
+
+  # Sync numeric sub-mode radio to draft and re-render inputs
+  observeEvent(input$numeric_sub_mode, {
+    rv$numeric_sub_mode_draft <- input$numeric_sub_mode
+    rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L
+  }, ignoreInit = TRUE)
+
+  # Sync apply inflation checkbox to draft
+  observeEvent(input$apply_inflation_post, {
+    rv$apply_inflation_flag_draft <- isTRUE(input$apply_inflation_post)
+  }, ignoreInit = TRUE)
+
+  # Sync salary selection to draft
+  observeEvent(input$salary_id_post, {
+    rv$salary_id_draft <- input$salary_id_post %||% ""
+  }, ignoreInit = TRUE)
+
+  # Sync numeric single value to draft
+  observeEvent(input$numeric_single_value, {
+    rv$numeric_single_value_draft <- suppressWarnings(as.numeric(input$numeric_single_value)) %||% 0
+  }, ignoreInit = TRUE)
 
   post_summary <- reactive({
     if (!nrow(rv$posts)) return(tibble())
@@ -4345,18 +4483,47 @@ server <- function(input, output, session) {
       character()
     }
 
+    # Restore apply inflation flag
+    rv$apply_inflation_flag_draft <- isTRUE(row$apply_inflation_flag[[1]])
+
+    # Restore salary/numeric mode drafts and map legacy modes
+    raw_mode <- as.character(row$value_mode[[1]] %||% "function")
+    vec_vals <- unlist(row$value_vector[[1]], use.names = FALSE)
+    if (raw_mode == "variable") {
+      # Legacy variable mode → numeric multi
+      rv$numeric_sub_mode_draft <- "multi"
+      rv$variable_defaults <- vec_vals
+    } else if (raw_mode == "constant") {
+      # Legacy constant mode → numeric single
+      rv$numeric_sub_mode_draft <- "single"
+      rv$numeric_single_value_draft <- suppressWarnings(as.numeric(row$constant_expr[[1]])) %||% 0
+    } else if (raw_mode == "numeric") {
+      if (length(vec_vals) == 0) {
+        rv$numeric_sub_mode_draft <- "single"
+        rv$numeric_single_value_draft <- suppressWarnings(as.numeric(row$constant_expr[[1]])) %||% 0
+      } else {
+        rv$numeric_sub_mode_draft <- "multi"
+        rv$variable_defaults <- vec_vals
+      }
+    } else if (raw_mode == "salary") {
+      rv$salary_id_draft <- as.character(row$function_expr[[1]] %||% "")
+    }
+
     updateTextInput(session, "post_name", value = row$post_name[[1]])
     updateSelectInput(session, "center", selected = row$center[[1]])
     updateSelectInput(session, "category", selected = row$category[[1]])
     updateDateRangeInput(session, "post_date_range", start = row$start_date[[1]], end = row$end_date[[1]])
     updateNumericInput(session, "fte", value = row$fte[[1]])
-    selected_mode <- if (identical(row$value_mode[[1]], "variable")) {
-      "variable"
-    } else if (identical(row$value_mode[[1]], "sum")) {
+    selected_mode <- if (raw_mode %in% c("variable", "constant", "numeric")) {
+      "numeric"
+    } else if (raw_mode == "salary") {
+      "salary"
+    } else if (raw_mode == "sum") {
       "sum"
     } else {
       "function"
     }
+    rv$value_mode_draft <- selected_mode
     updateSelectInput(session, "value_mode", selected = selected_mode)
     updateRadioButtons(session, "value_unit", selected = row$value_unit[[1]])
     updateTextInput(session, "function_expr", value = row$function_expr[[1]])
@@ -4364,6 +4531,7 @@ server <- function(input, output, session) {
     updateSelectizeInput(session, "sum_sites", selected = rv$sum_sites_draft)
     updateSelectizeInput(session, "sum_statuses", selected = rv$sum_statuses_draft)
     updateSelectizeInput(session, "sum_posts", selected = rv$sum_posts_draft)
+    updateCheckboxInput(session, "apply_inflation_post", value = rv$apply_inflation_flag_draft)
     updateTextAreaInput(session, "note", value = row$note[[1]])
     updateSelectInput(session, "application_status",
       selected = if (!is.null(row$application_status[[1]]) && nzchar(row$application_status[[1]])) row$application_status[[1]] else "Applied for")
@@ -4491,11 +4659,38 @@ server <- function(input, output, session) {
     }
 
     vec <- numeric()
-    if (isTRUE(if (is_editing) rv$value_mode_draft == "variable" else input$value_mode == "variable")) {
-      n_vals <- required_value_count()
-      vec <- map_dbl(seq_len(n_vals), function(i) {
-        as.numeric(input[[paste0("var_value_", i)]])
-      })
+    current_mode <- if (is_editing) rv$value_mode_draft else input$value_mode
+
+    if (identical(current_mode, "numeric")) {
+      sub_mode <- rv$numeric_sub_mode_draft
+      if (identical(sub_mode, "multi")) {
+        n_vals <- required_value_count()
+        vec <- map_dbl(seq_len(n_vals), function(i) {
+          as.numeric(input[[paste0("var_value_", i)]])
+        })
+      }
+    }
+
+    # Resolve constant_expr and function_expr based on mode
+    resolved_constant_expr <- if (identical(current_mode, "numeric") && identical(rv$numeric_sub_mode_draft, "single")) {
+      as.character(rv$numeric_single_value_draft %||% 0)
+    } else {
+      rv$constant_expr_draft
+    }
+
+    resolved_function_expr <- if (identical(current_mode, "salary")) {
+      rv$salary_id_draft %||% (input$salary_id_post %||% "")
+    } else {
+      ifelse(is.null(input$function_expr) || !nzchar(input$function_expr), rv$function_expr_draft, input$function_expr)
+    }
+
+    # Determine value_unit: formula/sum/salary always monthly
+    resolved_unit <- if (current_mode %in% c("function", "sum", "salary")) {
+      "month"
+    } else if (is_editing) {
+      rv$value_unit_draft
+    } else {
+      input$value_unit %||% "month"
     }
 
     new_row <- tibble(
@@ -4506,10 +4701,10 @@ server <- function(input, output, session) {
       start_date = if (is_editing) val_start_date else range_start,
       end_date = if (is_editing) val_end_date else range_end,
       fte = if (is_editing) rv$fte_draft else suppressWarnings(as.numeric(input$fte)),
-      value_mode = if (is_editing) rv$value_mode_draft else input$value_mode,
-      value_unit = if (is_editing) rv$value_unit_draft else input$value_unit,
-      constant_expr = rv$constant_expr_draft,
-      function_expr = ifelse(is.null(input$function_expr) || !nzchar(input$function_expr), rv$function_expr_draft, input$function_expr),
+      value_mode = current_mode,
+      value_unit = resolved_unit,
+      constant_expr = resolved_constant_expr,
+      function_expr = resolved_function_expr,
       value_vector = list(vec),
       sum_multiplier = if (!is.null(input$sum_multiplier) && nzchar(input$sum_multiplier)) input$sum_multiplier else (rv$sum_multiplier_draft %||% "1"),
       sum_sites = if (!is.null(input$sum_sites) && length(input$sum_sites) > 0) paste(input$sum_sites, collapse = "||") else if (length(rv$sum_sites_draft) > 0) paste(rv$sum_sites_draft, collapse = "||") else "",
@@ -4518,7 +4713,8 @@ server <- function(input, output, session) {
       note = if (is_editing) rv$note_draft else input$note,
       needs_amendment = FALSE,
       application_status = if (is_editing) val_app_status else (if (!is.null(input$application_status)) input$application_status else "Applied for"),
-      import_issues = ""
+      import_issues = "",
+      apply_inflation_flag = rv$apply_inflation_flag_draft
     )
 
     dup <- rv$posts %>%
