@@ -354,9 +354,9 @@ make_salary_lookup &lt;- function(salaries_tbl) {
       own_pension = own_pension_amount_monthly,
       holiday_base = holiday_allowance_total_monthly,
       holiday = holiday_allowance_monthly,
-      total_plus_holiday_m = total_plus_holiday_salary_monthly,
+      total_plus_holiday = total_plus_holiday_salary_monthly,
       total_plus_holiday_y = total_plus_holiday_salary_yearly,
-      total_m = total_salary_monthly,
+      total = total_salary_monthly,
       total_y = total_salary_yearly
     ) %&gt;%
     as.data.frame(stringsAsFactors = FALSE)
@@ -366,7 +366,7 @@ make_salary_lookup &lt;- function(salaries_tbl) {
   out
 }
 
-# Issue #4: Create salary environment objects for formula access (identifier$total_m style)
+# Issue #4: Create salary environment objects for formula access (identifier$total style)
 make_salary_env_objects &lt;- function(salaries_tbl) {
   if (!nrow(salaries_tbl)) {
     return(list())
@@ -378,14 +378,14 @@ make_salary_env_objects &lt;- function(salaries_tbl) {
     identifier &lt;- row$identifier
     # Create a one-row data frame for each salary
     salary_obj &lt;- data.frame(
-      base_m = row$base_salary_monthly,
-      pension_m = row$pension_amount_monthly,
-      own_pension_m = row$own_pension_amount_monthly,
-      holiday_base_m = row$holiday_allowance_total_monthly,
-      holiday_m = row$holiday_allowance_monthly,
-      total_plus_holiday_m = row$total_plus_holiday_salary_monthly,
+      base = row$base_salary_monthly,
+      pension = row$pension_amount_monthly,
+      own_pension = row$own_pension_amount_monthly,
+      holiday_base = row$holiday_allowance_total_monthly,
+      holiday = row$holiday_allowance_monthly,
+      total_plus_holiday = row$total_plus_holiday_salary_monthly,
       total_plus_holiday_y = row$total_plus_holiday_salary_yearly,
-      total_m = row$total_salary_monthly,
+      total = row$total_salary_monthly,
       total_y = row$total_salary_yearly,
       stringsAsFactors = FALSE
     )
@@ -554,9 +554,9 @@ make_default_templates &lt;- function() {
     category = c("", "Salary for research year (RY)", "Salary Ph.D. students"),
     center = rep("", 3),
     mode = c("function", "function", "function"),
-    unit = c("month", "year", "month"),
+    unit = c("month", "month", "month"),
     constant_expr = rep("0", 3),
-    function_expr = c("rep(0, n)", "research_year$total_y", "apply_inflation_month(phd_student$total_m)"),
+    function_expr = c("apply_inflation(clinical_researcher$total)*FTE", "research_year$total", "apply_inflation(phd_student$total)"),
     fte = c(NA_real_, 1, 1),
     note = c("", "", ""),
     values = list(numeric(), numeric(), numeric()),
@@ -732,7 +732,7 @@ resolve_post_values &lt;- function(post_row, salaries_lookup = data.frame(), inf
   }
 
   # Helper to compute sum of amounts across posts in given site(s)
-  # Issue #4: Generate salary objects for identifier$total_m access
+  # Issue #4: Generate salary objects for identifier$total access
   salary_objs &lt;- list()
   if (!is.null(salaries_tbl) &amp;&amp; nrow(salaries_tbl) &gt; 0) {
     salary_objs &lt;- make_salary_env_objects(salaries_tbl)
@@ -2579,13 +2579,13 @@ server &lt;- function(input, output, session) {
         ),
       colnames = c(
         "ID", "Name",
-        "Base (base_m)",
-        "Pension (pension_m)",
-        "Own pens (own_pension_m)",
-        "Hol base (holiday_base_m)",
-        "Holiday (holiday_m)",
-        "Total+hol (total_plus_holiday_m)", "Total+hol (total_plus_holiday_y)",
-        "Total (total_m)", "Total (total_y)"
+        "Base (base)",
+        "Pension (pension)",
+        "Own pens (own_pension)",
+        "Hol base (holiday_base)",
+        "Holiday (holiday)",
+        "Total+holiday (total_plus_holiday)", "Total+holiday (total_plus_holiday_y)",
+        "Total (total)", "Total (total_y)"
       ),
       selection = "single",
       rownames = FALSE,
@@ -2607,11 +2607,11 @@ server &lt;- function(input, output, session) {
 
   output$salary_identifier_help &lt;- renderText({
     if (!nrow(rv$salaries)) {
-      return("Formula helper: after you add salaries, reference them like phd_student$total_m.")
+      return("Formula helper: after you add salaries, reference them like phd_student$total.")
     }
     ids &lt;- paste(rv$salaries$identifier, collapse = ", ")
     first_id &lt;- rv$salaries$identifier[[1]]
-    paste0("Formula helper: identifiers are ", ids, ". Example: apply_inflation_month(", first_id, "$total_m)")
+    paste0("Formula helper: identifiers are ", ids, ". Example: apply_inflation(", first_id, "$total)")
   })
 
   selected_salary_id &lt;- reactive({
@@ -3430,7 +3430,7 @@ server &lt;- function(input, output, session) {
 
     if (mode == "function") {
       tagList(
-        textInput("function_expr", amend_label("Formula expression", show_amend = is_amended_field("function_expr")), value = isolate(rv$function_expr_draft), placeholder = "Expression using n, FTE, fte(site), salary_identifier$total_m and apply_inflation() helper"),
+        textInput("function_expr", amend_label("Formula expression", show_amend = is_amended_field("function_expr")), value = isolate(rv$function_expr_draft), placeholder = "Expression using n, FTE, fte(site), salary_identifier$total and apply_inflation() helper"),
         actionButton("show_formula_help", "Help: available formula variables")
       )
     } else if (mode == "sum") {
@@ -5052,15 +5052,14 @@ server &lt;- function(input, output, session) {
       ),
       tags$p("Salary references:"),
       tags$ul(
-        tags$li("Each salary identifier is available as an object, e.g. phd_student$total_m"),
+        tags$li("Each salary identifier is available as an object, e.g. phd_student$total"),
         tags$li("Identifiers are generated from salary names and made unique"),
-        tags$li("Monthly selectors: base_m, pension_m, own_pension_m, holiday_base_m, holiday_m, total_plus_holiday_m, total_m"),
-        tags$li("Yearly selectors: total_plus_holiday_y, total_y"),
-        tags$li(tags$b("total_m / total_y"), " — the final effective salary (holiday-absence deducted if 'Subtract holiday' is on)"),
-        tags$li(tags$b("total_plus_holiday_m / total_plus_holiday_y"), " — salary including holiday allowance but before holiday-absence deduction")
+        tags$li("Selectors: base, pension, own_pension, holiday_base, holiday, total_plus_holiday, total"),
+        tags$li(tags$b("total"), " — the final effective monthly salary (holiday-absence deducted if 'Subtract holiday' is on)"),
+        tags$li(tags$b("total_plus_holiday"), " — monthly salary including holiday allowance but before holiday-absence deduction")
       ),
       tags$p("Examples:"),
-      tags$pre("apply_inflation_month(phd_student$total_m)\nresearch_year$total_plus_holiday_m\nclinical_researcher$total_y")
+      tags$pre("apply_inflation(phd_student$total)\nresearch_year$total_plus_holiday\nclinical_researcher$total")
     ))
   })
 
