@@ -4,6 +4,7 @@ library(tidyr)
 library(lubridate)
 library(purrr) 
 library(tibble)
+library(stringr)
 library(DT)
 library(ggplot2)
 library(scales)
@@ -86,7 +87,10 @@ make_empty_salaries <- function() {
     holiday_allowance_total_yearly = numeric(),
     holiday_allowance_yearly = numeric(),
     total_plus_holiday_salary_yearly = numeric(),
-    total_salary_yearly = numeric()
+    total_salary_yearly = numeric(),
+    is_default = logical(),
+    is_deleted = logical(),
+    is_edited = logical()
   )
 }
 
@@ -121,7 +125,10 @@ make_default_salaries <- function() {
     holiday_allowance_total_yearly    = c(ry$holiday_allowance_total_yearly,   cr$holiday_allowance_total_yearly,   phd$holiday_allowance_total_yearly),
     holiday_allowance_yearly          = c(ry$holiday_allowance_yearly,         cr$holiday_allowance_yearly,         phd$holiday_allowance_yearly),
     total_plus_holiday_salary_yearly  = c(ry$total_plus_holiday_salary_yearly, cr$total_plus_holiday_salary_yearly, phd$total_plus_holiday_salary_yearly),
-    total_salary_yearly               = c(ry$total_salary_yearly,              cr$total_salary_yearly,              phd$total_salary_yearly)
+    total_salary_yearly               = c(ry$total_salary_yearly,              cr$total_salary_yearly,              phd$total_salary_yearly),
+    is_default                        = rep(TRUE, 3),
+    is_deleted                        = rep(FALSE, 3),
+    is_edited                         = rep(FALSE, 3)
   )
 }
 
@@ -154,7 +161,8 @@ make_default_categories <- function() {
     per_unit = rep("", 19),
     is_default = rep(TRUE, 19),
     is_locked = c(TRUE, rep(FALSE, 18)),
-    is_deleted = rep(FALSE, 19)
+    is_deleted = rep(FALSE, 19),
+    is_edited = rep(FALSE, 19)
   )
 }
 
@@ -164,7 +172,8 @@ make_default_sites <- function() {
     name = "Main",
     is_default = TRUE,
     is_locked = TRUE,
-    is_deleted = FALSE
+    is_deleted = FALSE,
+    is_edited = FALSE
   )
 }
 
@@ -255,6 +264,7 @@ make_salary_lookup <- function(salaries_tbl) {
   }
 
   out <- salaries_tbl %>%
+    filter(!is_deleted) %>%
     transmute(
       identifier = identifier,
       base = base_salary_monthly,
@@ -281,8 +291,10 @@ make_salary_env_objects <- function(salaries_tbl) {
   }
   
   salaries_list <- list()
-  for (i in seq_len(nrow(salaries_tbl))) {
-    row <- salaries_tbl[i, ]
+  active_salaries <- salaries_tbl %>% filter(!is_deleted)
+  
+  for (i in seq_len(nrow(active_salaries))) {
+    row <- active_salaries[i, ]
     identifier <- row$identifier
     # Create a one-row data frame for each salary
     salary_obj <- data.frame(
@@ -361,6 +373,73 @@ generate_salary_identifier <- function(salary_name, existing_identifiers = chara
   paste0(slug, "_", counter)
 }
 
+# === EDIT DETECTION HELPERS (Issue #11) ===
+detect_salary_edited <- function(salary_row, defaults) {
+  tryCatch({
+    # Compare salary to its default version to determine if edited
+    default_row <- defaults %>% filter(id == salary_row$id[1])
+    if (nrow(default_row) == 0) return(FALSE)  # User-created salaries are not "edited"
+    if (!isTRUE(default_row$is_default[[1]])) return(FALSE)
+    
+    # Check input fields only (not derived fields)
+    input_fields <- c("base_salary", "unit", "pension_mode", "pension_value", "own_pension_pct", "wage_supplement", "holiday_rate", "subtract_holiday")
+    for (field in input_fields) {
+      if (!identical(salary_row[[field]][1], default_row[[field]][1])) {
+        return(TRUE)
+      }
+    }
+    FALSE
+  }, error = function(e) FALSE)
+}
+
+detect_category_edited <- function(category_row, defaults) {
+  tryCatch({
+    default_row <- defaults %>% filter(id == category_row$id[1])
+    if (nrow(default_row) == 0) return(FALSE)
+    if (!isTRUE(default_row$is_default[[1]])) return(FALSE)
+    
+    input_fields <- c("name", "operator", "amount", "per_unit")
+    for (field in input_fields) {
+      if (!identical(category_row[[field]][1], default_row[[field]][1])) {
+        return(TRUE)
+      }
+    }
+    FALSE
+  }, error = function(e) FALSE)
+}
+
+detect_site_edited <- function(site_row, defaults) {
+  tryCatch({
+    default_row <- defaults %>% filter(id == site_row$id[1])
+    if (nrow(default_row) == 0) return(FALSE)
+    if (!isTRUE(default_row$is_default[[1]])) return(FALSE)
+    
+    input_fields <- c("name")
+    for (field in input_fields) {
+      if (!identical(site_row[[field]][1], default_row[[field]][1])) {
+        return(TRUE)
+      }
+    }
+    FALSE
+  }, error = function(e) FALSE)
+}
+
+detect_template_edited <- function(template_row, defaults) {
+  tryCatch({
+    default_row <- defaults %>% filter(id == template_row$id[1])
+    if (nrow(default_row) == 0) return(FALSE)
+    if (!isTRUE(default_row$is_default[[1]])) return(FALSE)
+    
+    input_fields <- c("name", "category", "center", "mode", "unit", "constant_expr", "function_expr", "fte", "note", "duration_years")
+    for (field in input_fields) {
+      if (!identical(template_row[[field]][1], default_row[[field]][1])) {
+        return(TRUE)
+      }
+    }
+    FALSE
+  }, error = function(e) FALSE)
+}
+
 # === CATEGORY VALIDATION HELPERS (Issue #2) ===
 make_empty_category_registry <- function() {
   tibble(
@@ -371,7 +450,8 @@ make_empty_category_registry <- function() {
     per_unit = character(),
     is_default = logical(),
     is_locked = logical(),
-    is_deleted = logical()
+    is_deleted = logical(),
+    is_edited = logical()
   )
 }
 
@@ -451,7 +531,8 @@ make_empty_template_registry <- function() {
     values = list(),
     duration_years = numeric(),
     is_default = logical(),
-    is_deleted = logical()
+    is_deleted = logical(),
+    is_edited = logical()
   )
 }
 
@@ -471,6 +552,7 @@ make_default_templates <- function() {
     duration_years = c(NA_real_, 3, NA_real_),
     is_default = rep(TRUE, 3),
     is_deleted = rep(FALSE, 3),
+    is_edited = rep(FALSE, 3),
     application_status = rep("Applied for", 3)
   )
 }
@@ -496,7 +578,7 @@ find_posts_with_deleted_site <- function(posts_tbl, site_registry) {
     pull(id)
 }
 
-get_post_amendment_fields <- function(post_row, budget_start, budget_end, category_registry, site_registry, post_import_issues = NULL) {
+get_post_amendment_fields <- function(post_row, budget_start, budget_end, category_registry, site_registry, salaries_tbl = NULL, post_import_issues = NULL) {
   fields <- character(0)
 
   if (post_row$start_date < budget_start || post_row$end_date > budget_end) fields <- c(fields, "post_date_range")
@@ -511,7 +593,30 @@ get_post_amendment_fields <- function(post_row, budget_start, budget_end, catego
     nrow() > 0
   if (bad_site) fields <- c(fields, "center")
 
-  # Check for formula errors in import issues
+  # Check if post formula references any deleted salaries
+  if (!is.null(post_row$function_expr) && nzchar(trimws(post_row$function_expr))) {
+    # Extract salary identifiers from formula (pattern: identifier$field)
+    formula_text <- post_row$function_expr
+    # Look for patterns like "salary_name$" or "salary_name " or at start
+    salary_refs <- stringr::str_extract_all(formula_text, "\\b[a-z_][a-z0-9_]*(?=\\$|\\s|\\)|\\+|\\-|\\*|/|,)")[[1]]
+    
+    if (length(salary_refs) > 0 && !is.null(post_row) && is.data.frame(post_row)) {
+      # Check each referenced salary
+      for (sal_ref in unique(salary_refs)) {
+        # Only check if it looks like a salary identifier (lowercase with underscores)
+        if (grepl("^[a-z_][a-z0-9_]*$", sal_ref)) {
+          # Look for deleted salary with matching identifier or name
+          deleted_salary <- salaries_tbl %>%
+            filter((identifier == sal_ref | tolower(name) == sal_ref) & is_deleted) %>%
+            nrow() > 0
+          if (deleted_salary) {
+            fields <- c(fields, "function_expr")
+            break
+          }
+        }
+      }
+    }
+  }
   if (!is.null(post_import_issues) && nrow(post_import_issues) > 0) {
     issue_row <- post_import_issues %>% filter(id == post_row$id)
     if (nrow(issue_row) > 0 && !is.na(issue_row$import_issues[1]) && nzchar(issue_row$import_issues[1])) {
@@ -1031,7 +1136,8 @@ serialize_categories <- function(categories_tbl) {
       per_unit = as.character(per_unit),
       is_default = as.logical(is_default),
       is_locked = as.logical(is_locked),
-      is_deleted = as.logical(is_deleted)
+      is_deleted = as.logical(is_deleted),
+      is_edited = as.logical(is_edited)
     )
 }
 
@@ -1043,7 +1149,8 @@ serialize_sites <- function(sites_tbl) {
       name = as.character(name),
       is_default = as.logical(is_default),
       is_locked = as.logical(is_locked),
-      is_deleted = as.logical(is_deleted)
+      is_deleted = as.logical(is_deleted),
+      is_edited = as.logical(is_edited)
     )
 }
 
@@ -1057,18 +1164,23 @@ parse_sites <- function(sites_tbl) {
   if (!"is_locked" %in% names(parsed)) {
     parsed$is_locked <- FALSE
   }
+  if (!"is_edited" %in% names(parsed)) {
+    parsed$is_edited <- FALSE
+  }
   parsed <- parsed %>%
     mutate(
       id = suppressWarnings(as.integer(id)),
       name = as.character(name),
       is_default = as.logical(is_default),
       is_locked = as.logical(is_locked),
-      is_deleted = as.logical(is_deleted)
+      is_deleted = as.logical(is_deleted),
+      is_edited = as.logical(is_edited)
     )
 
   if (!any(parsed$is_locked & !parsed$is_deleted, na.rm = TRUE)) {
     parsed <- bind_rows(make_default_sites(), parsed)
   }
+  
   parsed
 }
 
@@ -1082,6 +1194,9 @@ parse_categories <- function(categories_tbl) {
   if (!"is_locked" %in% names(parsed)) {
     parsed$is_locked <- FALSE
   }
+  if (!"is_edited" %in% names(parsed)) {
+    parsed$is_edited <- FALSE
+  }
   parsed <- parsed %>%
     mutate(
       id = suppressWarnings(as.integer(id)),
@@ -1091,12 +1206,14 @@ parse_categories <- function(categories_tbl) {
       per_unit = as.character(per_unit),
       is_default = as.logical(is_default),
       is_locked = as.logical(is_locked),
-      is_deleted = as.logical(is_deleted)
+      is_deleted = as.logical(is_deleted),
+      is_edited = as.logical(is_edited)
     )
 
   if (!any(parsed$name == "Uncategorized")) {
     parsed <- bind_rows(make_default_categories() %>% slice(1), parsed)
   }
+  
   parsed
 }
 
@@ -1117,7 +1234,8 @@ serialize_templates <- function(templates_tbl) {
       values = map_chr(values, ~ paste(as.numeric(.x), collapse = ";")),
       duration_years = as.numeric(duration_years),
       is_default = as.logical(is_default),
-      is_deleted = as.logical(is_deleted)
+      is_deleted = as.logical(is_deleted),
+      is_edited = as.logical(is_edited)
     )
 }
 
@@ -1153,8 +1271,11 @@ parse_templates <- function(templates_tbl) {
   if (!"is_locked" %in% names(templates_tbl)) {
     templates_tbl$is_locked <- FALSE
   }
+  if (!"is_edited" %in% names(templates_tbl)) {
+    templates_tbl$is_edited <- FALSE
+  }
 
-  templates_tbl %>%
+  parsed <- templates_tbl %>%
     mutate(
       id = suppressWarnings(as.integer(id)),
       name = as.character(name),
@@ -1172,11 +1293,14 @@ parse_templates <- function(templates_tbl) {
       is_default = as.logical(is_default),
       is_locked = as.logical(is_locked),
       is_deleted = as.logical(is_deleted),
+      is_edited = as.logical(is_edited),
       application_status = {
         v <- as.character(application_status)
         ifelse(is.na(v) | !nzchar(v), "Applied for", v)
       }
     )
+  
+  parsed
 }
 
 parse_salaries <- function(salaries_tbl) {
@@ -1193,6 +1317,9 @@ parse_salaries <- function(salaries_tbl) {
   if (!"wage_supplement" %in% names(salaries_tbl)) salaries_tbl$wage_supplement <- 0
   if (!"holiday_rate" %in% names(salaries_tbl)) salaries_tbl$holiday_rate <- 12.5
   if (!"subtract_holiday" %in% names(salaries_tbl)) salaries_tbl$subtract_holiday <- TRUE
+  if (!"is_default" %in% names(salaries_tbl)) salaries_tbl$is_default <- FALSE
+  if (!"is_deleted" %in% names(salaries_tbl)) salaries_tbl$is_deleted <- FALSE
+  if (!"is_edited" %in% names(salaries_tbl)) salaries_tbl$is_edited <- FALSE
 
   salaries_tbl <- salaries_tbl %>%
     mutate(
@@ -1206,9 +1333,14 @@ parse_salaries <- function(salaries_tbl) {
       own_pension_pct = as.numeric(own_pension_pct),
       wage_supplement = as.numeric(wage_supplement),
       holiday_rate = as.numeric(holiday_rate),
-      subtract_holiday = as.logical(subtract_holiday)
+      subtract_holiday = as.logical(subtract_holiday),
+      is_default = as.logical(is_default),
+      is_deleted = as.logical(is_deleted),
+      is_edited = as.logical(is_edited)
     )
 
+  defaults <- make_default_salaries()
+  
   # Recalculate all derived fields from input params
   map_dfr(seq_len(nrow(salaries_tbl)), function(i) {
     row <- salaries_tbl[i, ]
@@ -1218,6 +1350,7 @@ parse_salaries <- function(salaries_tbl) {
       error = function(e) NULL
     )
     na_num <- NA_real_
+    is_edited <- if (row$is_default) detect_salary_edited(row, defaults) else TRUE
     tibble(
       id = row$id, identifier = row$identifier, name = row$name, unit = row$unit,
       base_salary = row$base_salary, pension_mode = row$pension_mode,
@@ -1239,7 +1372,10 @@ parse_salaries <- function(salaries_tbl) {
       holiday_allowance_total_yearly    = if (is.null(calc)) na_num else calc$holiday_allowance_total_yearly,
       holiday_allowance_yearly          = if (is.null(calc)) na_num else calc$holiday_allowance_yearly,
       total_plus_holiday_salary_yearly  = if (is.null(calc)) na_num else calc$total_plus_holiday_salary_yearly,
-      total_salary_yearly               = if (is.null(calc)) na_num else calc$total_salary_yearly
+      total_salary_yearly               = if (is.null(calc)) na_num else calc$total_salary_yearly,
+      is_default = row$is_default,
+      is_deleted = row$is_deleted,
+      is_edited = is_edited
     )
   })
 }
@@ -1279,12 +1415,13 @@ required_label <- function(text) {
 }
 
 ui <- fluidPage(
+  tags$head(tags$link(rel = "stylesheet", href = "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css")),
   tags$head(tags$style(HTML(
     "
     #header-row input, #header-row .btn {
       height:38px;
       margin:0 0 5px 0;
-    },
+    }
     input.form-control, div.selectize-input, container-fluid {
       font-size: 12px !important;
     }
@@ -1449,6 +1586,42 @@ ui <- fluidPage(
       .period-side-border {
         border-right: 1px solid #ddd;
       }
+    }
+    /* Issue #11: Styling for deleted rows */
+    .deleted-row {
+      opacity: 0.5 !important;
+      color: #999 !important;
+      background-color: #f5f5f5 !important;
+    }
+    /* Issue #11: Action cells should not wrap */
+    .actions-cell {
+      white-space: nowrap !important;
+    }
+    /* Issue #11: Action button styling */
+    .salary-edit-btn, .salary-delete-btn, .salary-revert-btn, .salary-restore-btn,
+    .site-edit-btn, .site-delete-btn, .site-restore-btn,
+    .cat-edit-btn, .cat-delete-btn, .cat-revert-btn, .cat-restore-btn,
+    .tpl-edit-btn, .tpl-delete-btn, .tpl-revert-btn, .tpl-restore-btn {
+      background: none !important;
+      border: none !important;
+      cursor: pointer !important;
+      font-size: 16px !important;
+      padding: 0 4px !important;
+      line-height: 1 !important;
+      margin: 0 2px !important;
+      display: inline-block !important;
+    }
+    .salary-edit-btn, .site-edit-btn, .cat-edit-btn, .tpl-edit-btn {
+      color: #333 !important;
+    }
+    .salary-delete-btn, .site-delete-btn, .cat-delete-btn, .tpl-delete-btn {
+      color: #dc3545 !important;
+    }
+    .salary-revert-btn, .cat-revert-btn, .tpl-revert-btn {
+      color: #28a745 !important;
+    }
+    .salary-restore-btn, .site-restore-btn, .cat-restore-btn, .tpl-restore-btn {
+      color: #007bff !important;
     }
     "
   ))),
@@ -2025,11 +2198,24 @@ ui <- fluidPage(
           tags$hr(),
           br(),
           DTOutput("salary_table"),
-          br(),
-          fluidRow(
-            column(6, actionButton("salary_edit_selected", "Edit selected salary", class = "btn-primary", style = "width: 100%; padding: 10px 0;")),
-            column(6, actionButton("salary_delete_selected", "Delete selected salary", class = "btn-danger", style = "width: 100%; padding: 10px 0;"))
-          ),
+          tags$script(HTML("
+            $(document).on('click', '.salary-edit-btn', function() {
+              var id = $(this).data('id');
+              Shiny.setInputValue('salary_action_btn', 'edit:' + id, {priority: 'event'});
+            });
+            $(document).on('click', '.salary-delete-btn', function() {
+              var id = $(this).data('id');
+              Shiny.setInputValue('salary_action_btn', 'delete:' + id, {priority: 'event'});
+            });
+            $(document).on('click', '.salary-revert-btn', function() {
+              var id = $(this).data('id');
+              Shiny.setInputValue('salary_action_btn', 'revert:' + id, {priority: 'event'});
+            });
+            $(document).on('click', '.salary-restore-btn', function() {
+              var id = $(this).data('id');
+              Shiny.setInputValue('salary_action_btn', 'restore:' + id, {priority: 'event'});
+            });
+          ")),
           br(),
           textOutput("salary_identifier_help")
         ),
@@ -2041,6 +2227,20 @@ ui <- fluidPage(
           fluidRow(
             column(12,
               DTOutput("sites_table"),
+              tags$script(HTML("
+                $(document).on('click', '.site-edit-btn', function() {
+                  var id = $(this).data('id');
+                  Shiny.setInputValue('site_action_btn', 'edit:' + id, {priority: 'event'});
+                });
+                $(document).on('click', '.site-delete-btn', function() {
+                  var id = $(this).data('id');
+                  Shiny.setInputValue('site_action_btn', 'delete:' + id, {priority: 'event'});
+                });
+                $(document).on('click', '.site-restore-btn', function() {
+                  var id = $(this).data('id');
+                  Shiny.setInputValue('site_action_btn', 'restore:' + id, {priority: 'event'});
+                });
+              ")),
               br(),
               fluidRow(
                 column(6, textInput("site_name", "Name")),
@@ -2048,11 +2248,6 @@ ui <- fluidPage(
               ),
               fluidRow(
                 column(4, actionButton("site_add", "Add", class = "btn-success")),
-                column(4, actionButton("site_edit_selected", "Edit", class = "btn-primary")),
-                column(4, tags$div())
-              ),
-              fluidRow(
-                column(4, actionButton("site_delete_selected", "Delete Site", class = "btn-danger")),
                 column(4, actionButton("site_clear_all", "Clear All Sites", class = "btn-warning")),
                 column(4, uiOutput("restore_sites_control"))
               ),
@@ -2064,6 +2259,24 @@ ui <- fluidPage(
           fluidRow(
             column(12,
               DTOutput("categories_table"),
+              tags$script(HTML("
+                $(document).on('click', '.cat-edit-btn', function() {
+                  var id = $(this).data('id');
+                  Shiny.setInputValue('cat_action_btn', 'edit:' + id, {priority: 'event'});
+                });
+                $(document).on('click', '.cat-delete-btn', function() {
+                  var id = $(this).data('id');
+                  Shiny.setInputValue('cat_action_btn', 'delete:' + id, {priority: 'event'});
+                });
+                $(document).on('click', '.cat-revert-btn', function() {
+                  var id = $(this).data('id');
+                  Shiny.setInputValue('cat_action_btn', 'revert:' + id, {priority: 'event'});
+                });
+                $(document).on('click', '.cat-restore-btn', function() {
+                  var id = $(this).data('id');
+                  Shiny.setInputValue('cat_action_btn', 'restore:' + id, {priority: 'event'});
+                });
+              ")),
               br(),
               fluidRow(
                 column(3, textInput("cat_name", "Name")),
@@ -2074,11 +2287,6 @@ ui <- fluidPage(
               tags$div(style = "margin: 4px 0 10px; color: #555;", "Operators define the rule, Amount is the threshold, and Per says whether the threshold applies to each month, each calendar year, or each project year."),
               fluidRow(
                 column(4, actionButton("cat_add", "Add", class = "btn-success")),
-                column(4, actionButton("cat_edit_selected", "Edit", class = "btn-primary")),
-                column(4, tags$div())
-              ),
-              fluidRow(
-                column(4, actionButton("cat_delete_selected", "Delete Category", class = "btn-danger")),
                 column(4, actionButton("cat_clear_all", "Clear All Categories", class = "btn-warning")),
                 column(4, uiOutput("restore_categories_control"))
               ),
@@ -2090,12 +2298,26 @@ ui <- fluidPage(
           fluidRow(
             column(12,
               DTOutput("templates_table"),
+              tags$script(HTML("
+                $(document).on('click', '.tpl-delete-btn', function() {
+                  var id = $(this).data('id');
+                  Shiny.setInputValue('tpl_action_btn', 'delete:' + id, {priority: 'event'});
+                });
+                $(document).on('click', '.tpl-revert-btn', function() {
+                  var id = $(this).data('id');
+                  Shiny.setInputValue('tpl_action_btn', 'revert:' + id, {priority: 'event'});
+                });
+                $(document).on('click', '.tpl-restore-btn', function() {
+                  var id = $(this).data('id');
+                  Shiny.setInputValue('tpl_action_btn', 'restore:' + id, {priority: 'event'});
+                });
+              ")),
               br(),
               tags$p(tags$em("To add or edit a template, use the 'Save template' button in the Add post panel.")),
               fluidRow(
-                column(4, actionButton("tpl_delete_selected", "Delete Template", class = "btn-danger")),
                 column(4, actionButton("tpl_clear_all", "Clear All Templates", class = "btn-warning")),
-                column(4, uiOutput("restore_templates_control"))
+                column(4, uiOutput("restore_templates_control")),
+                column(4, tags$div())
               ),
               uiOutput("templates_error")
             )
@@ -2331,7 +2553,7 @@ server <- function(input, output, session) {
 
   output$sites_table <- renderDT({
     site_tbl <- rv$site_registry
-    needed <- c("id", "name", "is_default", "is_locked", "is_deleted")
+    needed <- c("id", "name", "is_default", "is_locked", "is_deleted", "is_edited")
     if (!all(needed %in% names(site_tbl))) {
       site_tbl <- make_default_sites()
     }
@@ -2341,23 +2563,48 @@ server <- function(input, output, session) {
         name = as.character(name),
         is_default = as.logical(is_default),
         is_locked = as.logical(is_locked),
-        is_deleted = as.logical(is_deleted)
+        is_deleted = as.logical(is_deleted),
+        is_edited = as.logical(is_edited)
       )
 
+    sites_display <- site_tbl %>%
+      mutate(
+        Actions = mapply(function(id, is_locked, is_deleted) {
+          if (is_deleted) {
+            sprintf('<button class="site-restore-btn" data-id="%d" title="Restore" style="background:none;border:none;cursor:pointer;color:#007bff;font-size:16px;padding:0 4px;line-height:1;display:inline-block;"><i class="fas fa-undo"></i></button>', id)
+          } else if (is_locked) {
+            ""  # No actions for locked sites (Main)
+          } else {
+            buttons <- sprintf('<button class="site-edit-btn" data-id="%d" title="Edit" style="background:none;border:none;cursor:pointer;color:#333;font-size:16px;padding:0 4px;line-height:1;display:inline-block;"><i class="fas fa-pen"></i></button>', id)
+            buttons <- paste0(buttons, sprintf('<button class="site-delete-btn" data-id="%d" title="Delete" style="background:none;border:none;cursor:pointer;color:#dc3545;font-size:16px;padding:0 4px;line-height:1;display:inline-block;"><i class="fas fa-trash"></i></button>', id))
+            buttons
+          }
+        }, id, is_locked, is_deleted, SIMPLIFY = TRUE)
+      ) %>%
+      select(Actions, id, name)
+
     datatable(
-      site_tbl %>%
-        filter(!is_deleted) %>%
-        select(name),
-      colnames = c("Name"),
-      selection = "single",
+      sites_display %>% select(-id),
+      colnames = c("Actions", "Name"),
+      selection = "none",
       rownames = FALSE,
-      options = list(pageLength = 10)
+      escape = FALSE,
+      options = list(pageLength = 10, columnDefs = list(
+        list(targets = 0, orderable = FALSE, searchable = FALSE)
+      ),
+      rowCallback = DT::JS('function(row, data, index) {',
+        'if (data[0].includes("site-restore-btn")) {',
+        '  $(row).addClass("deleted-row");',
+        '}',
+        '$("td:first", row).addClass("actions-cell");',
+        '}'
+      ))
     )
   })
 
   output$categories_table <- renderDT({
     cat_tbl <- rv$category_registry
-    needed <- c("id", "name", "operator", "amount", "per_unit", "is_default", "is_locked", "is_deleted")
+    needed <- c("id", "name", "operator", "amount", "per_unit", "is_default", "is_locked", "is_deleted", "is_edited")
     if (!all(needed %in% names(cat_tbl))) {
       cat_tbl <- make_default_categories()
     }
@@ -2370,23 +2617,50 @@ server <- function(input, output, session) {
         per_unit = as.character(per_unit),
         is_default = as.logical(is_default),
         is_locked = as.logical(is_locked),
-        is_deleted = as.logical(is_deleted)
+        is_deleted = as.logical(is_deleted),
+        is_edited = as.logical(is_edited)
       )
 
+    cat_display <- cat_tbl %>%
+      mutate(
+        Actions = mapply(function(id, is_default, is_deleted, is_edited) {
+          if (is_deleted) {
+            sprintf('<button class="cat-restore-btn" data-id="%d" title="Restore default" style="background:none;border:none;cursor:pointer;color:#007bff;font-size:16px;padding:0 4px;line-height:1;display:inline-block;"><i class="fas fa-undo"></i></button>', id)
+          } else {
+            buttons <- ""
+            if (is_default && is_edited) {
+              buttons <- sprintf('<button class="cat-revert-btn" data-id="%d" title="Revert to default" style="background:none;border:none;cursor:pointer;color:#28a745;font-size:16px;padding:0 4px;line-height:1;display:inline-block;"><i class="fas fa-reply"></i></button>', id)
+            }
+            buttons <- paste0(buttons, sprintf('<button class="cat-edit-btn" data-id="%d" title="Edit" style="background:none;border:none;cursor:pointer;color:#333;font-size:16px;padding:0 4px;line-height:1;display:inline-block;"><i class="fas fa-pen"></i></button>', id))
+            buttons <- paste0(buttons, sprintf('<button class="cat-delete-btn" data-id="%d" title="Delete" style="background:none;border:none;cursor:pointer;color:#dc3545;font-size:16px;padding:0 4px;line-height:1;display:inline-block;"><i class="fas fa-trash"></i></button>', id))
+            buttons
+          }
+        }, id, is_default, is_deleted, is_edited, SIMPLIFY = TRUE)
+      ) %>%
+      select(Actions, id, name, operator, amount, per_unit)
+
     datatable(
-      cat_tbl %>%
-        filter(!is_deleted) %>%
-        select(name, operator, amount, per_unit),
-      colnames = c("Name", "Operator", "Amount", "Per"),
-      selection = "single",
+      cat_display %>% select(-id),
+      colnames = c("Actions", "Name", "Operator", "Amount", "Per"),
+      selection = "none",
       rownames = FALSE,
-      options = list(pageLength = 10)
+      escape = FALSE,
+      options = list(pageLength = 10, columnDefs = list(
+        list(targets = 0, orderable = FALSE, searchable = FALSE)
+      ),
+      rowCallback = DT::JS('function(row, data, index) {',
+        'if (data[0].includes("cat-restore-btn")) {',
+        '  $(row).addClass("deleted-row");',
+        '}',
+        '$("td:first", row).addClass("actions-cell");',
+        '}'
+      ))
     )
   })
 
   output$templates_table <- renderDT({
     tpl_tbl <- rv$template_registry
-    needed <- c("id", "name", "category", "mode", "unit", "is_default", "is_deleted")
+    needed <- c("id", "name", "category", "mode", "unit", "is_default", "is_deleted", "is_edited")
     if (!all(needed %in% names(tpl_tbl))) {
       tpl_tbl <- make_default_templates()
     }
@@ -2400,7 +2674,8 @@ server <- function(input, output, session) {
         constant_expr = if ("constant_expr" %in% names(.)) as.character(constant_expr) else "0",
         function_expr = if ("function_expr" %in% names(.)) as.character(function_expr) else "rep(0, n)",
         is_default = as.logical(is_default),
-        is_deleted = as.logical(is_deleted)
+        is_deleted = as.logical(is_deleted),
+        is_edited = as.logical(is_edited)
       ) %>%
       mutate(
         Amount = case_when(
@@ -2409,14 +2684,40 @@ server <- function(input, output, session) {
         )
       )
 
+    tpl_display <- tpl_tbl %>%
+      mutate(
+        Actions = mapply(function(id, is_default, is_deleted, is_edited) {
+          if (is_deleted) {
+            sprintf('<button class="tpl-restore-btn" data-id="%d" title="Restore default" style="background:none;border:none;cursor:pointer;color:#007bff;font-size:16px;padding:0 4px;line-height:1;display:inline-block;"><i class="fas fa-undo"></i></button>', id)
+          } else {
+            buttons <- ""
+            if (is_default && is_edited) {
+              buttons <- sprintf('<button class="tpl-revert-btn" data-id="%d" title="Revert to default" style="background:none;border:none;cursor:pointer;color:#28a745;font-size:16px;padding:0 4px;line-height:1;display:inline-block;"><i class="fas fa-reply"></i></button>', id)
+            }
+            buttons <- paste0(buttons, sprintf('<button class="tpl-edit-btn" data-id="%d" title="Edit" style="background:none;border:none;cursor:pointer;color:#333;font-size:16px;padding:0 4px;line-height:1;display:inline-block;"><i class="fas fa-pen"></i></button>', id))
+            buttons <- paste0(buttons, sprintf('<button class="tpl-delete-btn" data-id="%d" title="Delete" style="background:none;border:none;cursor:pointer;color:#dc3545;font-size:16px;padding:0 4px;line-height:1;display:inline-block;"><i class="fas fa-trash"></i></button>', id))
+            buttons
+          }
+        }, id, is_default, is_deleted, is_edited, SIMPLIFY = TRUE)
+      ) %>%
+      select(Actions, id, name, category, Amount, unit)
+
     datatable(
-      tpl_tbl %>%
-        filter(!is_deleted) %>%
-        select(name, category, Amount, unit),
-      colnames = c("Name", "Category", "Amount", "Unit"),
-      selection = "single",
+      tpl_display %>% select(-id),
+      colnames = c("Actions", "Name", "Category", "Amount", "Unit"),
+      selection = "none",
       rownames = FALSE,
-      options = list(pageLength = 10)
+      escape = FALSE,
+      options = list(pageLength = 10, columnDefs = list(
+        list(targets = 0, orderable = FALSE, searchable = FALSE)
+      ),
+      rowCallback = DT::JS('function(row, data, index) {',
+        'if (data[0].includes("tpl-restore-btn")) {',
+        '  $(row).addClass("deleted-row");',
+        '}',
+        '$("td:first", row).addClass("actions-cell");',
+        '}'
+      ))
     )
   })
 
@@ -2473,20 +2774,38 @@ server <- function(input, output, session) {
   })
 
   output$salary_table <- renderDT({
-    datatable(
-      rv$salaries %>%
-        select(
-          identifier, name,
-          base_salary_monthly,
-          pension_amount_monthly,
-          own_pension_amount_monthly,
-          holiday_allowance_total_monthly,
-          holiday_allowance_monthly,
-          total_plus_holiday_salary_monthly, total_plus_holiday_salary_yearly,
-          total_salary_monthly, total_salary_yearly
-        ),
+    salary_display <- rv$salaries %>%
+      mutate(
+        Actions = mapply(function(id, is_default, is_deleted, is_edited) {
+          if (is_deleted) {
+            sprintf('<button class="salary-restore-btn" data-id="%d" title="Restore default values" style="background:none;border:none;cursor:pointer;color:#007bff;font-size:16px;padding:0 4px;line-height:1;display:inline-block;"><i class="fas fa-undo"></i></button>', id)
+          } else {
+            buttons <- ""
+            if (is_default && is_edited) {
+              buttons <- sprintf('<button class="salary-revert-btn" data-id="%d" title="Revert to default" style="background:none;border:none;cursor:pointer;color:#28a745;font-size:16px;padding:0 4px;line-height:1;display:inline-block;"><i class="fas fa-reply"></i></button>', id)
+            }
+            buttons <- paste0(buttons, sprintf('<button class="salary-edit-btn" data-id="%d" title="Edit" style="background:none;border:none;cursor:pointer;color:#333;font-size:16px;padding:0 4px;line-height:1;display:inline-block;"><i class="fas fa-pen"></i></button>', id))
+            buttons <- paste0(buttons, sprintf('<button class="salary-delete-btn" data-id="%d" title="Delete" style="background:none;border:none;cursor:pointer;color:#dc3545;font-size:16px;padding:0 4px;line-height:1;display:inline-block;"><i class="fas fa-trash"></i></button>', id))
+            buttons
+          }
+        }, id, is_default, is_deleted, is_edited, SIMPLIFY = TRUE)
+      ) %>%
+      select(
+        Actions,
+        identifier, name,
+        base_salary_monthly,
+        pension_amount_monthly,
+        own_pension_amount_monthly,
+        holiday_allowance_total_monthly,
+        holiday_allowance_monthly,
+        total_plus_holiday_salary_monthly, total_plus_holiday_salary_yearly,
+        total_salary_monthly, total_salary_yearly
+      )
+    
+    dt <- datatable(
+      salary_display,
       colnames = c(
-        "ID", "Name",
+        "Actions", "ID", "Name",
         "Base (base)",
         "Pension (pension)",
         "Own pens (own_pension)",
@@ -2495,9 +2814,19 @@ server <- function(input, output, session) {
         "Total+holiday (total_plus_holiday)", "Total+holiday (total_plus_holiday_y)",
         "Total (total)", "Total (total_y)"
       ),
-      selection = "single",
+      selection = "none",
       rownames = FALSE,
-      options = list(pageLength = 10, scrollX = TRUE)
+      escape = FALSE,
+      options = list(pageLength = 10, scrollX = TRUE, columnDefs = list(
+        list(targets = 0, orderable = FALSE, searchable = FALSE)
+      ),
+      rowCallback = DT::JS('function(row, data, index) {',
+        'if (data[0].includes("salary-restore-btn")) {',
+        '  $(row).addClass("deleted-row");',
+        '}',
+        '$("td:first", row).addClass("actions-cell");',
+        '}'
+      ))
     ) %>%
       formatRound(
         columns = c(
@@ -2511,6 +2840,8 @@ server <- function(input, output, session) {
         ),
         digits = 2
       )
+    
+    dt
   })
 
   output$salary_identifier_help <- renderText({
@@ -2587,7 +2918,10 @@ server <- function(input, output, session) {
       holiday_allowance_total_yearly = calc$holiday_allowance_total_yearly,
       holiday_allowance_yearly = calc$holiday_allowance_yearly,
       total_plus_holiday_salary_yearly = calc$total_plus_holiday_salary_yearly,
-      total_salary_yearly = calc$total_salary_yearly
+      total_salary_yearly = calc$total_salary_yearly,
+      is_default = if (is_new) FALSE else (rv$salaries %>% filter(id == sid) %>% pull(is_default) %>% .[1]),
+      is_deleted = FALSE,
+      is_edited = if (is_new) FALSE else (rv$salaries %>% filter(id == sid) %>% pull(is_default) %>% .[1])
     )
 
     if (is_new) {
@@ -2599,6 +2933,17 @@ server <- function(input, output, session) {
       rv$editing_salary_id <- NA_integer_
       set_success(paste("Salary calculation updated:", row$name))
     }
+    
+    # Clear form fields after save
+    updateTextInput(session, "salary_name", value = "")
+    updateSelectInput(session, "salary_unit", selected = "")
+    updateNumericInput(session, "salary_base", value = NA_real_)
+    updateSelectInput(session, "salary_pension_mode", selected = "")
+    updateNumericInput(session, "salary_pension_value", value = NA_real_)
+    updateNumericInput(session, "salary_own_pension_pct", value = NA_real_)
+    updateNumericInput(session, "salary_wage_supplement", value = NA_real_)
+    updateNumericInput(session, "salary_holiday_rate", value = NA_real_)
+    updateCheckboxInput(session, "salary_subtract_holiday", value = FALSE)
   })
 
   observeEvent(input$salary_edit_selected, {
@@ -2623,12 +2968,104 @@ server <- function(input, output, session) {
   observeEvent(input$salary_delete_selected, {
     sid <- selected_salary_id()
     req(!is.na(sid))
-    rv$salaries <- rv$salaries %>% filter(id != sid)
+    row <- rv$salaries %>% filter(id == sid)
+    req(nrow(row) == 1)
+    
+    # For default salaries, mark as deleted; for user salaries, remove
+    if (row$is_default[[1]]) {
+      rv$salaries <- rv$salaries %>% mutate(
+        is_deleted = ifelse(id == sid, TRUE, is_deleted)
+      )
+    } else {
+      rv$salaries <- rv$salaries %>% filter(id != sid)
+    }
+    
     if (!is.na(rv$editing_salary_id) && rv$editing_salary_id == sid) {
       rv$editing_salary_id <- NA_integer_
     }
     set_success("Salary calculation deleted.")
   })
+
+  # Handle salary action button clicks from table
+  observeEvent(input$salary_action_btn, {
+    req(input$salary_action_btn)
+    action_data <- strsplit(input$salary_action_btn, ":", fixed = TRUE)[[1]]
+    if (length(action_data) != 2) return()
+    
+    action <- action_data[1]
+    sid <- suppressWarnings(as.integer(action_data[2]))
+    req(!is.na(sid))
+    
+    row <- rv$salaries %>% filter(id == sid)
+    req(nrow(row) == 1)
+    
+    if (action == "edit") {
+      rv$editing_salary_id <- sid
+      updateTextInput(session, "salary_name", value = row$name[[1]])
+      updateSelectInput(session, "salary_unit", selected = row$unit[[1]])
+      updateNumericInput(session, "salary_base", value = row$base_salary[[1]])
+      updateSelectInput(session, "salary_pension_mode", selected = row$pension_mode[[1]])
+      updateNumericInput(session, "salary_pension_value", value = row$pension_value[[1]])
+      updateNumericInput(session, "salary_own_pension_pct", value = row$own_pension_pct[[1]])
+      updateNumericInput(session, "salary_wage_supplement", value = row$wage_supplement[[1]])
+      updateNumericInput(session, "salary_holiday_rate", value = row$holiday_rate[[1]])
+      updateCheckboxInput(session, "salary_subtract_holiday", value = isTRUE(row$subtract_holiday[[1]]))
+      set_success("Salary calculation loaded for editing.")
+    } else if (action == "delete") {
+      deleted_salary_row <- row
+      if (row$is_default[[1]]) {
+        rv$salaries <- rv$salaries %>% mutate(
+          is_deleted = ifelse(id == sid, TRUE, is_deleted)
+        )
+      } else {
+        rv$salaries <- rv$salaries %>% filter(id != sid)
+      }
+      
+      # Mark posts that reference this deleted salary as needing amendment
+      if (nrow(rv$posts) > 0) {
+        for (i in seq_len(nrow(rv$posts))) {
+          post_row <- rv$posts %>% slice(i)
+          amend_fields <- get_post_amendment_fields(
+            post_row = post_row,
+            budget_start = as.Date(input$budget_start),
+            budget_end = as.Date(input$budget_end),
+            category_registry = rv$category_registry,
+            site_registry = rv$site_registry,
+            salaries_tbl = rv$salaries,
+            post_import_issues = rv$post_import_issues
+          )
+          if ("function_expr" %in% amend_fields) {
+            rv$posts <- rv$posts %>% 
+              mutate(needs_amendment = if_else(id == post_row$id, TRUE, needs_amendment))
+          }
+        }
+      }
+      
+      if (!is.na(rv$editing_salary_id) && rv$editing_salary_id == sid) {
+        rv$editing_salary_id <- NA_integer_
+      }
+      set_success("Salary calculation deleted and posts marked for amendment if needed.")
+    } else if (action == "revert") {
+      # Revert to default values
+      defaults <- make_default_salaries()
+      default_row <- defaults %>% filter(id == sid)
+      if (nrow(default_row) > 0) {
+        rv$salaries <- rv$salaries %>% filter(id != sid) %>% bind_rows(default_row)
+        if (!is.na(rv$editing_salary_id) && rv$editing_salary_id == sid) {
+          rv$editing_salary_id <- NA_integer_
+        }
+        set_success("Salary calculation reverted to default.")
+      }
+    } else if (action == "restore") {
+      # Restore deleted default
+      defaults <- make_default_salaries()
+      default_row <- defaults %>% filter(id == sid)
+      if (nrow(default_row) > 0) {
+        rv$salaries <- rv$salaries %>% filter(id != sid) %>% bind_rows(default_row)
+        set_success("Default salary calculation restored.")
+      }
+    }
+  }, ignoreInit = TRUE)
 
   output$success_feedback <- renderUI({
     if (is.null(rv$success_text)) return(NULL)
@@ -2749,9 +3186,43 @@ server <- function(input, output, session) {
     row <- rv$site_registry %>% filter(id == site_id)
     req(nrow(row) == 1)
     rv$editing_site_id <- site_id
-    updateTextInput(session, "site_name", value = row$name)
+    updateTextInput(session, "site_name", value = row$name[[1]])
     set_success("Site loaded into fields for editing.")
   })
+
+  # Handle site action button clicks from table
+  observeEvent(input$site_action_btn, {
+    req(input$site_action_btn)
+    action_data <- strsplit(input$site_action_btn, ":", fixed = TRUE)[[1]]
+    if (length(action_data) != 2) return()
+    
+    action <- action_data[1]
+    site_id <- suppressWarnings(as.integer(action_data[2]))
+    req(!is.na(site_id))
+    
+    row <- rv$site_registry %>% filter(id == site_id)
+    req(nrow(row) == 1)
+    
+    if (action == "edit") {
+      rv$editing_site_id <- site_id
+      updateTextInput(session, "site_name", value = row$name[[1]])
+      set_success("Site loaded into fields for editing.")
+    } else if (action == "delete") {
+      if (isTRUE(row$is_locked[[1]])) {
+        rv$sites_error_text <- "The default site cannot be deleted."
+        return()
+      }
+      deleted_site_name <- row$name[[1]]
+      rv$site_registry <- rv$site_registry %>% mutate(is_deleted = if_else(id == site_id, TRUE, is_deleted))
+      rv$posts <- rv$posts %>% mutate(needs_amendment = if_else(center == deleted_site_name, TRUE, needs_amendment))
+      rv$editing_site_id <- NA_integer_
+      set_success("Site deleted and posts marked for amendment.")
+    } else if (action == "restore") {
+      rv$site_registry <- rv$site_registry %>%
+        mutate(is_deleted = if_else(id == site_id, FALSE, is_deleted))
+      set_success("Deleted site restored.")
+    }
+  }, ignoreInit = TRUE)
 
   observeEvent(input$site_add, {
     rv$sites_error_text <- NULL
@@ -2793,7 +3264,8 @@ server <- function(input, output, session) {
       name = nm,
       is_default = prev_default,
       is_locked = prev_locked,
-      is_deleted = FALSE
+      is_deleted = FALSE,
+      is_edited = FALSE
     )
 
     old_name <- if (nrow(prev) == 1) prev$name[[1]] else NULL
@@ -2870,6 +3342,7 @@ server <- function(input, output, session) {
                 budget_end = as.Date(input$budget_end),
                 category_registry = rv$category_registry,
                 site_registry = rv$site_registry,
+                salaries_tbl = rv$salaries,
                 post_import_issues = rv$post_import_issues
               )
               rv$amend_fields <- amend_fields
@@ -2950,6 +3423,60 @@ server <- function(input, output, session) {
     set_success("Category loaded into fields for editing.")
   })
 
+  # Handle category action button clicks from table
+  observeEvent(input$cat_action_btn, {
+    req(input$cat_action_btn)
+    action_data <- strsplit(input$cat_action_btn, ":", fixed = TRUE)[[1]]
+    if (length(action_data) != 2) return()
+    
+    action <- action_data[1]
+    cat_id <- suppressWarnings(as.integer(action_data[2]))
+    req(!is.na(cat_id))
+    
+    row <- rv$category_registry %>% filter(id == cat_id)
+    req(nrow(row) == 1)
+    
+    if (action == "edit") {
+      if (isTRUE(row$is_locked[[1]])) {
+        rv$categories_error_text <- "Uncategorized cannot be edited."
+        return()
+      }
+      rv$editing_category_id <- cat_id
+      updateTextInput(session, "cat_name", value = row$name[[1]])
+      updateSelectInput(session, "cat_operator", selected = row$operator[[1]])
+      updateNumericInput(session, "cat_amount", value = row$amount[[1]])
+      updateSelectInput(session, "cat_per_unit", selected = row$per_unit[[1]])
+      set_success("Category loaded into fields for editing.")
+    } else if (action == "delete") {
+      if (isTRUE(row$is_locked[[1]])) {
+        rv$categories_error_text <- "Uncategorized cannot be deleted."
+        return()
+      }
+      deleted_cat_name <- row$name[[1]]
+      rv$category_registry <- rv$category_registry %>% mutate(is_deleted = if_else(id == cat_id, TRUE, is_deleted))
+      rv$posts <- rv$posts %>% mutate(needs_amendment = if_else(category == deleted_cat_name, TRUE, needs_amendment))
+      rv$editing_category_id <- NA_integer_
+      set_success("Category deleted and posts marked for amendment.")
+    } else if (action == "revert") {
+      # Revert to default values
+      defaults <- make_default_categories()
+      default_row <- defaults %>% filter(id == cat_id)
+      if (nrow(default_row) > 0) {
+        rv$category_registry <- rv$category_registry %>% filter(id != cat_id) %>% bind_rows(default_row)
+        rv$editing_category_id <- NA_integer_
+        set_success("Category reverted to default.")
+      }
+    } else if (action == "restore") {
+      # Restore deleted default
+      defaults <- make_default_categories()
+      default_row <- defaults %>% filter(id == cat_id)
+      if (nrow(default_row) > 0) {
+        rv$category_registry <- rv$category_registry %>% filter(id != cat_id) %>% bind_rows(default_row)
+        set_success("Default category restored.")
+      }
+    }
+  }, ignoreInit = TRUE)
+
   observeEvent(input$cat_add, {
     rv$categories_error_text <- NULL
     nm <- trimws(input$cat_name)
@@ -2984,7 +3511,8 @@ server <- function(input, output, session) {
       per_unit = ifelse(is.null(input$cat_per_unit), "", input$cat_per_unit),
       is_default = prev_default,
       is_locked = FALSE,
-      is_deleted = FALSE
+      is_deleted = FALSE,
+      is_edited = if (is_new) FALSE else prev_default
     )
 
     old_name <- if (nrow(prev) == 1) prev$name[[1]] else NULL
@@ -3054,6 +3582,43 @@ server <- function(input, output, session) {
     rv$editing_template_id <- NA_integer_
     set_success("Template deleted.")
   })
+
+  # Handle template action button clicks from table
+  observeEvent(input$tpl_action_btn, {
+    req(input$tpl_action_btn)
+    action_data <- strsplit(input$tpl_action_btn, ":", fixed = TRUE)[[1]]
+    if (length(action_data) != 2) return()
+    
+    action <- action_data[1]
+    tpl_id <- suppressWarnings(as.integer(action_data[2]))
+    req(!is.na(tpl_id))
+    
+    row <- rv$template_registry %>% filter(id == tpl_id)
+    req(nrow(row) == 1)
+    
+    if (action == "delete") {
+      rv$template_registry <- rv$template_registry %>% mutate(is_deleted = if_else(id == tpl_id, TRUE, is_deleted))
+      rv$editing_template_id <- NA_integer_
+      set_success("Template deleted.")
+    } else if (action == "revert") {
+      # Revert to default values
+      defaults <- make_default_templates()
+      default_row <- defaults %>% filter(id == tpl_id)
+      if (nrow(default_row) > 0) {
+        rv$template_registry <- rv$template_registry %>% filter(id != tpl_id) %>% bind_rows(default_row)
+        rv$editing_template_id <- NA_integer_
+        set_success("Template reverted to default.")
+      }
+    } else if (action == "restore") {
+      # Restore deleted default
+      defaults <- make_default_templates()
+      default_row <- defaults %>% filter(id == tpl_id)
+      if (nrow(default_row) > 0) {
+        rv$template_registry <- rv$template_registry %>% filter(id != tpl_id) %>% bind_rows(default_row)
+        set_success("Default template restored.")
+      }
+    }
+  }, ignoreInit = TRUE)
 
   observeEvent(input$tpl_clear_all, {
     showModal(modalDialog(
@@ -3219,6 +3784,7 @@ server <- function(input, output, session) {
       duration_years = dur_years,
       is_default     = prev_default,
       is_deleted     = FALSE,
+      is_edited      = if (is_new) FALSE else prev_default,
       application_status = if (!is.null(input$application_status)) input$application_status else "Applied for"
     )
 
@@ -4355,6 +4921,7 @@ server <- function(input, output, session) {
       budget_end = as.Date(input$budget_end),
       category_registry = rv$category_registry,
       site_registry = rv$site_registry,
+      salaries_tbl = rv$salaries,
       post_import_issues = rv$post_import_issues
     )
     rv$amend_fields <- amend_fields
