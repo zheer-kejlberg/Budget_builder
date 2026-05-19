@@ -1,0 +1,12 @@
+serialize_posts <- function(posts_tbl) {
+  if (!"apply_inflation" %in% names(posts_tbl)) {
+    posts_tbl$apply_inflation <- FALSE
+  }
+  posts_tbl %>%
+    mutate(
+      start_date = as.character(start_date),
+      end_date = as.character(end_date),
+      value_vector = map_chr(value_vector, ~ paste(.x, collapse = ";"))
+    )
+}
+

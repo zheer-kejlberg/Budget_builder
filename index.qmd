@@ -85,6 +85,7 @@ make_empty_posts <- function() {
     salary_field_selected = character(),
     numeric_input_mode = character(),
     multiply_by_fte = logical(),
+    apply_inflation = logical(),
     note = character(),
     needs_amendment = logical(),
     application_status = character(),
@@ -1043,10 +1044,10 @@ post_total <- function(post_row, all_posts_tbl = post_row, salaries_lookup = dat
 }
 
 serialize_posts <- function(posts_tbl) {
+  if (!"apply_inflation" %in% names(posts_tbl)) {
+    posts_tbl$apply_inflation <- FALSE
+  }
   posts_tbl %>%
-    select(id, center, post_name, category, start_date, end_date, fte, value_mode, value_unit, 
-           constant_expr, function_expr, value_vector, salary_selected, salary_field_selected, numeric_input_mode, multiply_by_fte, 
-           sum_multiplier, sum_sites, sum_statuses, sum_posts, note, needs_amendment, application_status, import_issues) %>%
     mutate(
       start_date = as.character(start_date),
       end_date = as.character(end_date),
@@ -1057,10 +1058,11 @@ serialize_posts <- function(posts_tbl) {
 serialize_inactive_posts <- function(posts_tbl) {
   if (!nrow(posts_tbl)) return(tibble())
   
+  if (!"apply_inflation" %in% names(posts_tbl)) {
+    posts_tbl$apply_inflation <- FALSE
+  }
+  
   posts_tbl %>%
-    select(id, center, post_name, category, start_date, end_date, fte, value_mode, value_unit, 
-           constant_expr, function_expr, value_vector, salary_selected, salary_field_selected, numeric_input_mode, multiply_by_fte, 
-           sum_multiplier, sum_sites, sum_statuses, sum_posts, note, needs_amendment, application_status, import_issues) %>%
     mutate(
       start_date = as.character(start_date),
       end_date = as.character(end_date),
@@ -1078,7 +1080,7 @@ parse_inactive_posts <- function(posts_tbl) {
     "id", "center", "post_name", "category", "start_date", "end_date",
     "fte", "value_mode", "value_unit", "constant_expr", "function_expr",
     "value_vector", "salary_selected", "salary_field_selected", "numeric_input_mode", "multiply_by_fte", 
-    "sum_multiplier", "sum_sites", "sum_statuses", "sum_posts", "note", "needs_amendment", "application_status", "import_issues"
+    "apply_inflation", "sum_multiplier", "sum_sites", "sum_statuses", "sum_posts", "note", "needs_amendment", "application_status", "import_issues"
   )
 
   if (!all(required %in% names(posts_tbl))) {
@@ -1089,6 +1091,7 @@ parse_inactive_posts <- function(posts_tbl) {
         salary_selected = "",
         salary_field_selected = "",
         multiply_by_fte = TRUE,
+        apply_inflation = FALSE,
         sum_multiplier = "",
         sum_sites = "",
         sum_statuses = "",
@@ -1106,6 +1109,7 @@ parse_inactive_posts <- function(posts_tbl) {
       id = as.integer(id),
       needs_amendment = as.logical(needs_amendment),
       multiply_by_fte = as.logical(multiply_by_fte),
+      apply_inflation = as.logical(apply_inflation),
       value_vector = strsplit(ifelse(is.na(value_vector), "", value_vector), ";", fixed = TRUE),
       value_vector = map(value_vector, ~ as.numeric(.x[nzchar(.x)])),
       application_status = {
@@ -1125,7 +1129,7 @@ parse_posts <- function(posts_tbl) {
     "id", "center", "post_name", "category", "start_date", "end_date",
     "fte", "value_mode", "value_unit", "constant_expr", "function_expr",
     "value_vector", "salary_selected", "salary_field_selected", "numeric_input_mode", "multiply_by_fte", 
-    "sum_multiplier", "sum_sites", "sum_statuses", "sum_posts", "note", "needs_amendment", "application_status"
+    "apply_inflation", "sum_multiplier", "sum_sites", "sum_statuses", "sum_posts", "note", "needs_amendment", "application_status"
   )
 
   if (!all(required %in% names(posts_tbl))) {
@@ -1148,6 +1152,7 @@ parse_posts <- function(posts_tbl) {
         salary_field_selected = "",
         numeric_input_mode = "single",
         multiply_by_fte = TRUE,
+        apply_inflation = FALSE,
         sum_multiplier = "",
         sum_sites = "",
         sum_statuses = "",
@@ -1168,6 +1173,7 @@ parse_posts <- function(posts_tbl) {
       id = as.integer(id),
       needs_amendment = as.logical(needs_amendment),
       multiply_by_fte = as.logical(multiply_by_fte),
+      apply_inflation = as.logical(apply_inflation),
       value_vector = strsplit(ifelse(is.na(value_vector), "", value_vector), ";", fixed = TRUE),
       value_vector = map(value_vector, ~ as.numeric(.x[nzchar(.x)])),
       application_status = {
@@ -2133,6 +2139,7 @@ ui <- fluidPage(
       selectInput("value_mode", "How should amount be defined?", choices = c("Numeric" = "variable", "Salary" = "salary", "Sum of other posts" = "sum", "Custom formula" = "function"), selected = "function"),
       uiOutput("value_unit_ui"),
       uiOutput("value_inputs_ui"),
+      uiOutput("apply_inflation_ui"),
       textAreaInput("note", "Note", value = "", rows = 2),
       selectInput("application_status", required_label("Application status"),
                   choices = c("Applied for", "Applied for elsewhere", "Not applied for", "Funded"),
@@ -2418,6 +2425,7 @@ server <- function(input, output, session) {
     value_unit_draft = "month",
     numeric_input_mode_draft = "single",
     multiply_by_fte_draft = TRUE,
+    apply_inflation_draft = FALSE,
     salary_selected_draft = "",
     salary_field_selected_draft = "",
     application_status_draft = "Applied for",
@@ -2497,6 +2505,7 @@ server <- function(input, output, session) {
     rv$salary_field_selected_draft <- ""
     rv$numeric_input_mode_draft <- "single"
     rv$multiply_by_fte_draft <- TRUE
+    rv$apply_inflation_draft <- FALSE
     rv$amend_fields <- character(0)
     # Clear all form inputs to blank/default state
     updateSelectizeInput(session, "template_name", selected = "")
@@ -2509,6 +2518,7 @@ server <- function(input, output, session) {
     updateRadioButtons(session, "value_unit", selected = "month")
     updateRadioButtons(session, "numeric_input_mode", selected = "single")
     updateCheckboxInput(session, "multiply_by_fte", value = TRUE)
+    updateCheckboxInput(session, "apply_inflation", value = FALSE)
     updateTextInput(session, "function_expr", value = "")
     updateSelectizeInput(session, "salary_selected", selected = "")
     updateSelectizeInput(session, "salary_field_selected", selected = "")
@@ -3950,6 +3960,18 @@ server <- function(input, output, session) {
     rv$multiply_by_fte_draft <- input$multiply_by_fte
   }, ignoreInit = TRUE)
 
+  observeEvent(input$apply_inflation, {
+    rv$apply_inflation_draft <- input$apply_inflation
+  }, ignoreInit = TRUE)
+
+  # Update apply_inflation default when value_mode changes (for adding new posts)
+  observeEvent(input$value_mode, {
+    if (is.na(rv$editing_id) && !is.null(input$value_mode)) {
+      default_checked <- identical(input$value_mode, "salary")
+      updateCheckboxInput(session, "apply_inflation", value = default_checked)
+    }
+  }, ignoreInit = TRUE)
+
   # Reactive for dynamically filtering posts based on sum mode criteria
   # Empty selections mean "show all" (no filter applied)
   sum_mode_filtered_posts <- reactive({
@@ -4135,6 +4157,22 @@ server <- function(input, output, session) {
       "Total (yearly)" = "total_y"
     )
   }
+
+  output$apply_inflation_ui <- renderUI({
+    value_mode <- input$value_mode
+    # Only show for salary, formula, and numeric modes
+    if (is.null(value_mode) || !(value_mode %in% c("salary", "function", "variable"))) {
+      return(NULL)
+    }
+    
+    # Determine default: TRUE for salary, FALSE for others
+    default_checked <- if (identical(value_mode, "salary")) TRUE else FALSE
+    
+    # Get current value from draft (when editing) or input (when adding)
+    current_value <- if (!is.na(rv$editing_id)) rv$apply_inflation_draft else (input$apply_inflation %||% default_checked)
+    
+    checkboxInput("apply_inflation", "Apply inflation", value = current_value)
+  })
 
   post_summary <- reactive({
     if (!nrow(rv$posts)) return(tibble())
@@ -5032,6 +5070,7 @@ server <- function(input, output, session) {
     rv$salary_field_selected_draft <- as.character(row$salary_field_selected[[1]] %||% "")
     rv$numeric_input_mode_draft <- as.character(row$numeric_input_mode[[1]] %||% "single")
     rv$multiply_by_fte_draft <- as.logical(row$multiply_by_fte[[1]] %||% TRUE)
+    rv$apply_inflation_draft <- as.logical(row$apply_inflation[[1]] %||% FALSE)
     rv$application_status_draft <- as.character(row$application_status[[1]] %||% "Applied for")
     rv$note_draft <- as.character(row$note[[1]] %||% "")
     
@@ -5102,6 +5141,7 @@ server <- function(input, output, session) {
     updateSelectizeInput(session, "salary_selected", selected = rv$salary_selected_draft)
     updateSelectizeInput(session, "salary_field_selected", selected = rv$salary_field_selected_draft)
     updateCheckboxInput(session, "multiply_by_fte", value = rv$multiply_by_fte_draft)
+    updateCheckboxInput(session, "apply_inflation", value = rv$apply_inflation_draft)
     updateTextInput(session, "sum_multiplier", value = rv$sum_multiplier_draft)
     updateSelectizeInput(session, "sum_sites", selected = rv$sum_sites_draft)
     updateSelectizeInput(session, "sum_statuses", selected = rv$sum_statuses_draft)
@@ -5269,6 +5309,7 @@ server <- function(input, output, session) {
     sal_selected <- if (is_editing) rv$salary_selected_draft else (input$salary_selected %||% "")
     sal_field <- if (is_editing) rv$salary_field_selected_draft else (input$salary_field_selected %||% "")
     sal_multiply_by_fte <- if (is_editing) rv$multiply_by_fte_draft else (input$multiply_by_fte %||% TRUE)
+    apply_inflation_flag <- if (is_editing) rv$apply_inflation_draft else (input$apply_inflation %||% FALSE)
     
     # Handle salary mode: convert to function mode with generated formula
     actual_value_mode <- val_mode
@@ -5291,8 +5332,18 @@ server <- function(input, output, session) {
       if (isTRUE(sal_multiply_by_fte)) {
         generated_function_expr <- paste0(generated_function_expr, " * FTE")
       }
+      # If apply_inflation is checked, wrap with apply_inflation()
+      if (isTRUE(apply_inflation_flag)) {
+        generated_function_expr <- paste0("apply_inflation(", generated_function_expr, ")")
+      }
       # For validation and storage, convert to function mode with the generated formula
       actual_value_mode <- "function"
+    } else if (val_mode == "function") {
+      # For function mode, wrap with apply_inflation() if checkbox is checked
+      user_function_expr <- if (is_editing) rv$function_expr_draft else input$function_expr
+      if (isTRUE(apply_inflation_flag) && !is.null(user_function_expr) && nzchar(user_function_expr)) {
+        generated_function_expr <- paste0("apply_inflation(", user_function_expr, ")")
+      }
     }
 
     new_row <- tibble(
@@ -5312,6 +5363,7 @@ server <- function(input, output, session) {
       salary_field_selected = sal_field,
       numeric_input_mode = if (is_editing) rv$numeric_input_mode_draft else (input$numeric_input_mode %||% "single"),
       multiply_by_fte = sal_multiply_by_fte,
+      apply_inflation = apply_inflation_flag,
       sum_multiplier = if (!is.null(input$sum_multiplier) && nzchar(input$sum_multiplier)) input$sum_multiplier else (rv$sum_multiplier_draft %||% "1"),
       sum_sites = if (!is.null(input$sum_sites) && length(input$sum_sites) > 0) paste(input$sum_sites, collapse = "||") else if (length(rv$sum_sites_draft) > 0) paste(rv$sum_sites_draft, collapse = "||") else "",
       sum_statuses = if (!is.null(input$sum_statuses) && length(input$sum_statuses) > 0) paste(input$sum_statuses, collapse = "||") else if (length(rv$sum_statuses_draft) > 0) paste(rv$sum_statuses_draft, collapse = "||") else "",
