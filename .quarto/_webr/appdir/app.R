@@ -2227,7 +2227,7 @@ ui <- fluidPage(
             column(12, uiOutput("salary_error"))
           ),
           fluidRow(
-            column(12, actionButton("salary_add_or_update", "Add / Update salary", class = "btn-success", style = "width: 100%; padding: 12px 0; margin: 12px 0;"))
+            column(12, uiOutput("salary_add_or_update_button"))
           ),
           tags$hr(),
           br(),
@@ -2281,7 +2281,7 @@ ui <- fluidPage(
                 column(6, tags$div())
               ),
               fluidRow(
-                column(4, actionButton("site_add", "Add", class = "btn-success")),
+                column(4, uiOutput("site_add_button")),
                 column(4, actionButton("site_clear_all", "Clear All Sites", class = "btn-warning")),
                 column(4, uiOutput("restore_sites_control"))
               ),
@@ -2320,7 +2320,7 @@ ui <- fluidPage(
               ),
               tags$div(style = "margin: 4px 0 10px; color: #555;", "Operators define the rule, Amount is the threshold, and Per says whether the threshold applies to each month, each calendar year, or each project year."),
               fluidRow(
-                column(4, actionButton("cat_add", "Add", class = "btn-success")),
+                column(4, uiOutput("cat_add_button")),
                 column(4, actionButton("cat_clear_all", "Clear All Categories", class = "btn-warning")),
                 column(4, uiOutput("restore_categories_control"))
               ),
@@ -2519,6 +2519,21 @@ server <- function(input, output, session) {
     actionButton("add_or_update", button_text, class = "btn-success", style = "width: 100%;")
   })
 
+  output$salary_add_or_update_button <- renderUI({
+    button_text <- if (is.na(rv$editing_salary_id)) "Add salary" else "Save changes"
+    actionButton("salary_add_or_update", button_text, class = "btn-success", style = "width: 100%; padding: 12px 0; margin: 12px 0;")
+  })
+
+  output$cat_add_button <- renderUI({
+    button_text <- if (is.na(rv$editing_category_id)) "Add" else "Save changes"
+    actionButton("cat_add", button_text, class = "btn-success")
+  })
+
+  output$site_add_button <- renderUI({
+    button_text <- if (is.na(rv$editing_site_id)) "Add" else "Save changes"
+    actionButton("site_add", button_text, class = "btn-success")
+  })
+
   output$workbook_name_error <- renderUI({
     if (is.null(rv$workbook_name_error)) return(NULL)
     tags$div(class = "inline-error", rv$workbook_name_error)
@@ -2672,9 +2687,12 @@ server <- function(input, output, session) {
 
     cat_display <- cat_tbl %>%
       mutate(
-        Actions = mapply(function(id, is_default, is_deleted, is_edited) {
+        Actions = mapply(function(id, name, is_default, is_deleted, is_edited) {
           if (is_deleted) {
             sprintf('<button class="cat-restore-btn" data-id="%d" title="Restore default" style="background:none;border:none;cursor:pointer;color:#007bff;font-size:16px;padding:0 4px;line-height:1;display:inline-block;"><i class="fas fa-undo"></i></button>', id)
+          } else if (name == "Uncategorized") {
+            # No buttons for Uncategorized
+            ""
           } else {
             buttons <- ""
             if (is_default && is_edited) {
@@ -2684,7 +2702,7 @@ server <- function(input, output, session) {
             buttons <- paste0(buttons, sprintf('<button class="cat-delete-btn" data-id="%d" title="Delete" style="background:none;border:none;cursor:pointer;color:#dc3545;font-size:16px;padding:0 4px;line-height:1;display:inline-block;"><i class="fas fa-trash"></i></button>', id))
             buttons
           }
-        }, id, is_default, is_deleted, is_edited, SIMPLIFY = TRUE)
+        }, id, name, is_default, is_deleted, is_edited, SIMPLIFY = TRUE)
       ) %>%
       select(Actions, id, name, operator, amount, per_unit)
 
