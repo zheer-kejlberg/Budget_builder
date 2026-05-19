@@ -2088,21 +2088,9 @@ ui <- fluidPage(
   sidebarLayout(
     sidebarPanel(
       h4("Add or edit post"),
-      selectizeInput(
-        "template_name",
-        "Template",
-        choices = make_default_templates()$name,
-        selected = character(0),
-        options = list(
-          create = TRUE,
-          persist = FALSE,
-          placeholder = "Select or type a new template name",
-          onInitialize = I('function() { this.clear(); }')
-        )
-      ),
-      actionButton("save_as_template_btn", "Save template", class = "btn-success", style = "margin: 0 max(30px, calc(50% - 100px));width: min(calc(100% - 60px), 200px);max-width: min(calc(100% - 60px), 200px);"),
+      uiOutput("template_selector_ui"),
       tags$hr(style = "margin: 8px 0;"),
-      textInput("post_name", required_label("Post name")),
+      uiOutput("post_name_label_ui"),
       selectInput("center", required_label("Site"), choices = c("", make_default_sites()$name), selected = ""),
       selectInput("category", required_label("Category"), choices = c("", make_default_categories()$name), selected = ""),
       dateRangeInput("post_date_range", required_label("Date range"), start = NA, end = NA, width = "100%"),
@@ -2227,6 +2215,9 @@ ui <- fluidPage(
             column(12, uiOutput("salary_error"))
           ),
           fluidRow(
+            column(12, uiOutput("salary_success_feedback"))
+          ),
+          fluidRow(
             column(12, uiOutput("salary_add_or_update_button"))
           ),
           tags$hr(),
@@ -2285,7 +2276,8 @@ ui <- fluidPage(
                 column(4, actionButton("site_clear_all", "Clear All Sites", class = "btn-warning")),
                 column(4, uiOutput("restore_sites_control"))
               ),
-              uiOutput("sites_error")
+              uiOutput("sites_error"),
+              uiOutput("site_success_feedback")
             )
           ),
           br(),
@@ -2324,7 +2316,8 @@ ui <- fluidPage(
                 column(4, actionButton("cat_clear_all", "Clear All Categories", class = "btn-warning")),
                 column(4, uiOutput("restore_categories_control"))
               ),
-              uiOutput("categories_error")
+              uiOutput("categories_error"),
+              uiOutput("category_success_feedback")
             )
           ),
           br(),
@@ -2333,6 +2326,10 @@ ui <- fluidPage(
             column(12,
               DTOutput("templates_table"),
               tags$script(HTML("
+                $(document).on('click', '.tpl-edit-btn', function() {
+                  var id = $(this).data('id');
+                  Shiny.setInputValue('tpl_action_btn', 'edit:' + id, {priority: 'event'});
+                });
                 $(document).on('click', '.tpl-delete-btn', function() {
                   var id = $(this).data('id');
                   Shiny.setInputValue('tpl_action_btn', 'delete:' + id, {priority: 'event'});
@@ -2347,13 +2344,14 @@ ui <- fluidPage(
                 });
               ")),
               br(),
-              tags$p(tags$em("To add or edit a template, use the 'Save template' button in the Add post panel.")),
+              tags$p(tags$em("Edit a template by clicking the edit button below, or click 'New template' to create a new one.")),
               fluidRow(
+                column(4, actionButton("new_template_btn", "New template", class = "btn-success")),
                 column(4, actionButton("tpl_clear_all", "Clear All Templates", class = "btn-warning")),
-                column(4, uiOutput("restore_templates_control")),
-                column(4, tags$div())
+                column(4, uiOutput("restore_templates_control"))
               ),
-              uiOutput("templates_error")
+              uiOutput("templates_error"),
+              uiOutput("template_success_feedback")
             )
           )
           )
@@ -2418,8 +2416,17 @@ server <- function(input, output, session) {
     table_refresh_nonce = 0L,
     success_text = NULL,
     success_at = NULL,
+    salary_success_text = NULL,
+    salary_success_at = NULL,
+    category_success_text = NULL,
+    category_success_at = NULL,
+    site_success_text = NULL,
+    site_success_at = NULL,
+    template_success_text = NULL,
+    template_success_at = NULL,
     post_import_issues = tibble(id = integer(), import_issues = character()),
-    current_post_amendment_reason = NULL
+    current_post_amendment_reason = NULL,
+    skip_next_template_observer = FALSE
   )
 
   show_error_modal <- function(msg) {
@@ -2436,6 +2443,26 @@ server <- function(input, output, session) {
     rv$success_at <- Sys.time()
   }
 
+  set_salary_success <- function(msg) {
+    rv$salary_success_text <- msg
+    rv$salary_success_at <- Sys.time()
+  }
+
+  set_category_success <- function(msg) {
+    rv$category_success_text <- msg
+    rv$category_success_at <- Sys.time()
+  }
+
+  set_site_success <- function(msg) {
+    rv$site_success_text <- msg
+    rv$site_success_at <- Sys.time()
+  }
+
+  set_template_success <- function(msg) {
+    rv$template_success_text <- msg
+    rv$template_success_at <- Sys.time()
+  }
+
   observeEvent(input$help_refresh_table, {
     rv$table_refresh_nonce <- rv$table_refresh_nonce + 1L
     set_success("Budget table refresh triggered.")
@@ -2446,14 +2473,16 @@ server <- function(input, output, session) {
   }
 
   refresh_post_field_labels <- function() {
-    updateTextInput(session, "post_name", label = amend_label("Post name", show_amend = is_amended_field("post_name"), required = TRUE))
+    # Use appropriate label based on whether editing a template or post
+    post_name_label <- if (!is.na(rv$editing_template_id)) "Template name" else "Post name"
+    updateTextInput(session, "post_name", label = amend_label(post_name_label, show_amend = is_amended_field("post_name"), required = TRUE))
     updateSelectInput(session, "center", label = amend_label("Site", show_amend = is_amended_field("center"), required = TRUE))
     updateSelectInput(session, "category", label = amend_label("Category", show_amend = is_amended_field("category"), required = TRUE))
     updateDateRangeInput(session, "post_date_range", label = amend_label("Date range", show_amend = is_amended_field("post_date_range"), required = TRUE))
     updateTextInput(session, "function_expr", label = amend_label("Formula expression", show_amend = is_amended_field("function_expr")))
   }
 
-  reset_form <- function() {
+  reset_form <- function(skip_template_name = FALSE) {
     rv$editing_id <- NA_integer_
     rv$variable_defaults <- numeric()
     rv$constant_expr_draft <- "0"
@@ -2479,7 +2508,9 @@ server <- function(input, output, session) {
     rv$apply_inflation_draft <- FALSE
     rv$amend_fields <- character(0)
     # Clear all form inputs to blank/default state
-    updateSelectizeInput(session, "template_name", selected = "")
+    if (!skip_template_name) {
+      updateSelectizeInput(session, "template_name", selected = "")
+    }
     updateTextInput(session, "post_name", value = "")
     updateSelectInput(session, "center", selected = "")
     updateSelectInput(session, "category", selected = "")
@@ -2515,8 +2546,67 @@ server <- function(input, output, session) {
 
   # Render button with dynamic text based on edit mode
   output$add_or_update_button <- renderUI({
-    button_text <- if (is.na(rv$editing_id)) "Add budget post" else "Save edit"
-    actionButton("add_or_update", button_text, class = "btn-success", style = "width: 100%;")
+    if (!is.na(rv$editing_template_id)) {
+      # Editing a template - show Save template and Cancel buttons
+      fluidRow(
+        column(6, actionButton("save_template_edit", "Save template", class = "btn-success", style = "width: 100%;")),
+        column(6, actionButton("cancel_template_edit", "Cancel", class = "btn-secondary", style = "width: 100%;"))
+      )
+    } else {
+      # Normal budget post form
+      is_editing <- !is.na(rv$editing_id)
+      button_text <- if (is_editing) "Save changes" else "Add budget post"
+      if (is_editing) {
+        fluidRow(
+          column(8, actionButton("add_or_update", button_text, class = "btn-success", style = "width: 100%;")),
+          column(4, actionButton("cancel_post_edit", "Cancel", class = "btn-secondary", style = "width: 100%;"))
+        )
+      } else {
+        actionButton("add_or_update", button_text, class = "btn-success", style = "width: 100%;")
+      }
+    }
+  })
+
+  output$post_name_label_ui <- renderUI({
+    if (!is.na(rv$editing_template_id)) {
+      textInput("post_name", required_label("Template name"))
+    } else {
+      textInput("post_name", required_label("Post name"))
+    }
+  })
+
+  output$template_selector_ui <- renderUI({
+    if (!is.na(rv$editing_template_id)) {
+      # Grey out and disable template selector when editing a template
+      div(
+        style = "opacity: 0.5; pointer-events: none; cursor: not-allowed;",
+        selectizeInput(
+          "template_name",
+          "Template",
+          choices = make_default_templates()$name,
+          selected = character(0),
+          options = list(
+            create = FALSE,
+            persist = FALSE,
+            placeholder = "(Editing template - unavailable)",
+            onInitialize = I('function() { this.clear(); }')
+          )
+        )
+      )
+    } else {
+      selectizeInput(
+        "template_name",
+        "Template",
+        choices = make_default_templates()$name,
+        selected = character(0),
+        options = list(
+          create = TRUE,
+          persist = FALSE,
+          placeholder = "Select or type a new template name",
+          onInitialize = I('function() { this.clear(); }')
+        )
+      )
+    }
   })
 
   output$salary_add_or_update_button <- renderUI({
@@ -3020,11 +3110,11 @@ server <- function(input, output, session) {
       rv$salaries <- bind_rows(rv$salaries, row)
       rv$next_salary_id <- rv$next_salary_id + 1L
       rv$editing_salary_id <- NA_integer_
-      set_success(paste("Salary calculation added:", row$name))
+      set_salary_success(paste("Salary calculation added:", row$name))
     } else {
       rv$salaries <- rv$salaries %>% filter(id != sid) %>% bind_rows(row)
       rv$editing_salary_id <- NA_integer_
-      set_success(paste("Salary calculation updated:", row$name))
+      set_salary_success(paste("Salary calculation updated:", row$name))
     }
     
     # Clear form fields after save
@@ -3055,7 +3145,7 @@ server <- function(input, output, session) {
     updateNumericInput(session, "salary_wage_supplement", value = row$wage_supplement)
     updateNumericInput(session, "salary_holiday_rate", value = row$holiday_rate)
     updateCheckboxInput(session, "salary_subtract_holiday", value = isTRUE(row$subtract_holiday))
-    set_success("Salary calculation loaded for editing.")
+    set_salary_success("Salary calculation loaded for editing.")
   })
 
   observeEvent(input$salary_delete_selected, {
@@ -3072,7 +3162,7 @@ server <- function(input, output, session) {
     if (!is.na(rv$editing_salary_id) && rv$editing_salary_id == sid) {
       rv$editing_salary_id <- NA_integer_
     }
-    set_success("Salary calculation deleted.")
+    set_salary_success("Salary calculation deleted.")
   })
 
   # Handle salary action button clicks from table
@@ -3099,7 +3189,7 @@ server <- function(input, output, session) {
       updateNumericInput(session, "salary_wage_supplement", value = row$wage_supplement[[1]])
       updateNumericInput(session, "salary_holiday_rate", value = row$holiday_rate[[1]])
       updateCheckboxInput(session, "salary_subtract_holiday", value = isTRUE(row$subtract_holiday[[1]]))
-      set_success("Salary calculation loaded for editing.")
+      set_salary_success("Salary calculation loaded for editing.")
     } else if (action == "delete") {
       # For both default and custom salaries, mark as deleted (don't remove from table)
       rv$salaries <- rv$salaries %>% mutate(
@@ -3129,7 +3219,7 @@ server <- function(input, output, session) {
       if (!is.na(rv$editing_salary_id) && rv$editing_salary_id == sid) {
         rv$editing_salary_id <- NA_integer_
       }
-      set_success("Salary calculation deleted and posts marked for amendment if needed.")
+      set_salary_success("Salary calculation deleted and posts marked for amendment if needed.")
     } else if (action == "revert") {
       # Revert to default values
       defaults <- make_default_salaries()
@@ -3139,7 +3229,7 @@ server <- function(input, output, session) {
         if (!is.na(rv$editing_salary_id) && rv$editing_salary_id == sid) {
           rv$editing_salary_id <- NA_integer_
         }
-        set_success("Salary calculation reverted to default.")
+        set_salary_success("Salary calculation reverted to default.")
       }
     } else if (action == "restore") {
       # Restore deleted salary - whether default or custom
@@ -3150,13 +3240,13 @@ server <- function(input, output, session) {
       if (nrow(default_row) > 0) {
         # This is a default salary - replace with fresh default
         rv$salaries <- rv$salaries %>% filter(id != sid) %>% bind_rows(default_row)
-        set_success("Default salary calculation restored.")
+        set_salary_success("Default salary calculation restored.")
       } else {
         # This is a custom salary - just unmark as deleted
         rv$salaries <- rv$salaries %>% mutate(
           is_deleted = ifelse(id == sid, FALSE, is_deleted)
         )
-        set_success("Custom salary calculation restored.")
+        set_salary_success("Custom salary calculation restored.")
       }
     }
   }, ignoreInit = TRUE)
@@ -3166,6 +3256,26 @@ server <- function(input, output, session) {
     tags$div(class = "flash-msg flash-success", rv$success_text)
   })
 
+  output$salary_success_feedback <- renderUI({
+    if (is.null(rv$salary_success_text)) return(NULL)
+    tags$div(class = "flash-msg flash-success", rv$salary_success_text)
+  })
+
+  output$category_success_feedback <- renderUI({
+    if (is.null(rv$category_success_text)) return(NULL)
+    tags$div(class = "flash-msg flash-success", rv$category_success_text)
+  })
+
+  output$site_success_feedback <- renderUI({
+    if (is.null(rv$site_success_text)) return(NULL)
+    tags$div(class = "flash-msg flash-success", rv$site_success_text)
+  })
+
+  output$template_success_feedback <- renderUI({
+    if (is.null(rv$template_success_text)) return(NULL)
+    tags$div(class = "flash-msg flash-success", rv$template_success_text)
+  })
+
   observeEvent(rv$success_at, {
     if (!is.null(rv$success_at)) {
       stamp <- rv$success_at
@@ -3173,6 +3283,54 @@ server <- function(input, output, session) {
         if (!is.null(rv$success_at) && identical(rv$success_at, stamp)) {
           rv$success_text <- NULL
           rv$success_at <- NULL
+        }
+      }, delay = 4)
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(rv$salary_success_at, {
+    if (!is.null(rv$salary_success_at)) {
+      stamp <- rv$salary_success_at
+      later::later(function() {
+        if (!is.null(rv$salary_success_at) && identical(rv$salary_success_at, stamp)) {
+          rv$salary_success_text <- NULL
+          rv$salary_success_at <- NULL
+        }
+      }, delay = 4)
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(rv$category_success_at, {
+    if (!is.null(rv$category_success_at)) {
+      stamp <- rv$category_success_at
+      later::later(function() {
+        if (!is.null(rv$category_success_at) && identical(rv$category_success_at, stamp)) {
+          rv$category_success_text <- NULL
+          rv$category_success_at <- NULL
+        }
+      }, delay = 4)
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(rv$site_success_at, {
+    if (!is.null(rv$site_success_at)) {
+      stamp <- rv$site_success_at
+      later::later(function() {
+        if (!is.null(rv$site_success_at) && identical(rv$site_success_at, stamp)) {
+          rv$site_success_text <- NULL
+          rv$site_success_at <- NULL
+        }
+      }, delay = 4)
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(rv$template_success_at, {
+    if (!is.null(rv$template_success_at)) {
+      stamp <- rv$template_success_at
+      later::later(function() {
+        if (!is.null(rv$template_success_at) && identical(rv$template_success_at, stamp)) {
+          rv$template_success_text <- NULL
+          rv$template_success_at <- NULL
         }
       }, delay = 4)
     }
@@ -3281,7 +3439,7 @@ server <- function(input, output, session) {
     req(nrow(row) == 1)
     rv$editing_site_id <- site_id
     updateTextInput(session, "site_name", value = row$name[[1]])
-    set_success("Site loaded into fields for editing.")
+    set_site_success("Site loaded into fields for editing.")
   })
 
   # Handle site action button clicks from table
@@ -3300,7 +3458,7 @@ server <- function(input, output, session) {
     if (action == "edit") {
       rv$editing_site_id <- site_id
       updateTextInput(session, "site_name", value = row$name[[1]])
-      set_success("Site loaded into fields for editing.")
+      set_site_success("Site loaded into fields for editing.")
     } else if (action == "delete") {
       if (isTRUE(row$is_locked[[1]])) {
         rv$sites_error_text <- "The default site cannot be deleted."
@@ -3310,7 +3468,7 @@ server <- function(input, output, session) {
       rv$site_registry <- rv$site_registry %>% mutate(is_deleted = if_else(id == site_id, TRUE, is_deleted))
       rv$posts <- rv$posts %>% mutate(needs_amendment = if_else(center == deleted_site_name, TRUE, needs_amendment))
       rv$editing_site_id <- NA_integer_
-      set_success("Site deleted and posts marked for amendment.")
+      set_site_success("Site deleted and posts marked for amendment.")
     } else if (action == "restore") {
       rv$site_registry <- rv$site_registry %>%
         mutate(is_deleted = if_else(id == site_id, FALSE, is_deleted))
@@ -3449,7 +3607,7 @@ server <- function(input, output, session) {
 
     rv$editing_site_id <- NA_integer_
     updateTextInput(session, "site_name", value = "")
-    set_success(if (is_new) paste("Site added:", nm) else paste("Site updated:", nm))
+    set_site_success(if (is_new) paste("Site added:", nm) else paste("Site updated:", nm))
   })
 
   observeEvent(input$site_delete_selected, {
@@ -3465,7 +3623,7 @@ server <- function(input, output, session) {
     rv$site_registry <- rv$site_registry %>% mutate(is_deleted = if_else(id == site_id, TRUE, is_deleted))
     rv$posts <- rv$posts %>% mutate(needs_amendment = if_else(center == deleted_site_name, TRUE, needs_amendment))
     rv$editing_site_id <- NA_integer_
-    set_success("Site deleted and posts marked for amendment.")
+    set_site_success("Site deleted and posts marked for amendment.")
   })
 
   observeEvent(input$site_clear_all, {
@@ -3482,14 +3640,14 @@ server <- function(input, output, session) {
     rv$posts <- rv$posts %>% mutate(needs_amendment = if_else(!(center %in% active_locked_sites), TRUE, needs_amendment))
     rv$editing_site_id <- NA_integer_
     removeModal()
-    set_success("All non-default sites cleared.")
+    set_site_success("All non-default sites cleared.")
   })
 
   observeEvent(input$restore_default_sites, {
     defaults <- make_default_sites()
     rv$site_registry <- defaults
     rv$next_site_id <- max(defaults$id, na.rm = TRUE) + 1L
-    set_success("Default sites restored.")
+    set_site_success("Default sites restored.")
   })
 
   selected_category_id <- reactive({
@@ -3514,7 +3672,7 @@ server <- function(input, output, session) {
     updateSelectInput(session, "cat_operator", selected = row$operator)
     updateNumericInput(session, "cat_amount", value = row$amount)
     updateSelectInput(session, "cat_per_unit", selected = row$per_unit)
-    set_success("Category loaded into fields for editing.")
+    set_category_success("Category loaded into fields for editing.")
   })
 
   # Handle category action button clicks from table
@@ -3540,7 +3698,7 @@ server <- function(input, output, session) {
       updateSelectInput(session, "cat_operator", selected = row$operator[[1]])
       updateNumericInput(session, "cat_amount", value = row$amount[[1]])
       updateSelectInput(session, "cat_per_unit", selected = row$per_unit[[1]])
-      set_success("Category loaded into fields for editing.")
+      set_category_success("Category loaded into fields for editing.")
     } else if (action == "delete") {
       if (isTRUE(row$is_locked[[1]])) {
         rv$categories_error_text <- "Uncategorized cannot be deleted."
@@ -3550,7 +3708,7 @@ server <- function(input, output, session) {
       rv$category_registry <- rv$category_registry %>% mutate(is_deleted = if_else(id == cat_id, TRUE, is_deleted))
       rv$posts <- rv$posts %>% mutate(needs_amendment = if_else(category == deleted_cat_name, TRUE, needs_amendment))
       rv$editing_category_id <- NA_integer_
-      set_success("Category deleted and posts marked for amendment.")
+      set_category_success("Category deleted and posts marked for amendment.")
     } else if (action == "revert") {
       # Revert to default values
       defaults <- make_default_categories()
@@ -3558,7 +3716,7 @@ server <- function(input, output, session) {
       if (nrow(default_row) > 0) {
         rv$category_registry <- rv$category_registry %>% filter(id != cat_id) %>% bind_rows(default_row)
         rv$editing_category_id <- NA_integer_
-        set_success("Category reverted to default.")
+        set_category_success("Category reverted to default.")
       }
     } else if (action == "restore") {
       # Restore deleted default
@@ -3622,7 +3780,7 @@ server <- function(input, output, session) {
     updateSelectInput(session, "cat_operator", selected = "")
     updateNumericInput(session, "cat_amount", value = NA_real_)
     updateSelectInput(session, "cat_per_unit", selected = "")
-    set_success(if (is_new) paste("Category added:", nm) else paste("Category updated:", nm))
+    set_category_success(if (is_new) paste("Category added:", nm) else paste("Category updated:", nm))
   })
 
   observeEvent(input$cat_delete_selected, {
@@ -3636,7 +3794,7 @@ server <- function(input, output, session) {
     rv$category_registry <- rv$category_registry %>% mutate(is_deleted = if_else(id == cat_id, TRUE, is_deleted))
     rv$posts <- rv$posts %>% mutate(needs_amendment = if_else(category == deleted_cat_name, TRUE, needs_amendment))
     rv$editing_category_id <- NA_integer_
-    set_success("Category deleted and posts marked for amendment.")
+    set_category_success("Category deleted and posts marked for amendment.")
   })
 
   observeEvent(input$cat_clear_all, {
@@ -3659,7 +3817,7 @@ server <- function(input, output, session) {
     defaults <- make_default_categories()
     rv$category_registry <- defaults
     rv$next_category_id <- max(defaults$id, na.rm = TRUE) + 1L
-    set_success("Default categories restored.")
+    set_category_success("Default categories restored.")
   })
 
   selected_template_id <- reactive({
@@ -3690,10 +3848,40 @@ server <- function(input, output, session) {
     row <- rv$template_registry %>% filter(id == tpl_id)
     req(nrow(row) == 1)
     
-    if (action == "delete") {
+    if (action == "edit") {
+      # Load template into the form for editing
+      rv$editing_template_id <- tpl_id
+      updateSelectizeInput(session, "template_name", selected = row$name[[1]])
+      updateTextInput(session, "post_name", value = row$name[[1]])
+      updateSelectInput(session, "center", selected = row$site[[1]])
+      updateSelectInput(session, "category", selected = row$category[[1]])
+      updateSelectInput(session, "value_mode", selected = row$value_mode[[1]])
+      updateSelectInput(session, "value_unit", selected = row$value_unit[[1]])
+      updateSelectInput(session, "numeric_input_mode", selected = row$numeric_mode[[1]])
+      
+      if (row$value_mode[[1]] == "variable" || row$value_mode[[1]] == "salary") {
+        var_vals <- row$values[[1]]
+        for (i in seq_along(var_vals)) {
+          if (i <= required_value_count()) {
+            updateNumericInput(session, paste0("var_value_", i), value = var_vals[i])
+          }
+        }
+      } else if (row$value_mode[[1]] == "function") {
+        updateTextAreaInput(session, "function_expr", value = row$function_expr[[1]])
+      } else if (row$value_mode[[1]] == "sum") {
+        # Handle sum fields if needed
+      }
+      
+      updateCheckboxInput(session, "multiply_by_fte", value = isTRUE(row$multiply_fte[[1]]))
+      updateCheckboxInput(session, "apply_inflation", value = isTRUE(row$apply_inflat[[1]]))
+      updateTextAreaInput(session, "note", value = row$note[[1]] %||% "")
+      updateSelectInput(session, "application_status", selected = row$application_status[[1]])
+      
+      set_template_success(paste("Template loaded for editing:", row$name[[1]]))
+    } else if (action == "delete") {
       rv$template_registry <- rv$template_registry %>% mutate(is_deleted = if_else(id == tpl_id, TRUE, is_deleted))
       rv$editing_template_id <- NA_integer_
-      set_success("Template deleted.")
+      set_template_success("Template deleted.")
     } else if (action == "revert") {
       # Revert to default values
       defaults <- make_default_templates()
@@ -3701,7 +3889,8 @@ server <- function(input, output, session) {
       if (nrow(default_row) > 0) {
         rv$template_registry <- rv$template_registry %>% filter(id != tpl_id) %>% bind_rows(default_row)
         rv$editing_template_id <- NA_integer_
-        set_success("Template reverted to default.")
+        rv$skip_next_template_observer <- TRUE
+        set_template_success("Template reverted to default.")
       }
     } else if (action == "restore") {
       # Restore deleted default
@@ -3709,7 +3898,7 @@ server <- function(input, output, session) {
       default_row <- defaults %>% filter(id == tpl_id)
       if (nrow(default_row) > 0) {
         rv$template_registry <- rv$template_registry %>% filter(id != tpl_id) %>% bind_rows(default_row)
-        set_success("Default template restored.")
+        set_template_success("Default template restored.")
       }
     }
   }, ignoreInit = TRUE)
@@ -3726,17 +3915,28 @@ server <- function(input, output, session) {
     rv$template_registry <- rv$template_registry %>% mutate(is_deleted = TRUE)
     rv$editing_template_id <- NA_integer_
     removeModal()
-    set_success("All templates cleared.")
+    set_template_success("All templates cleared.")
   })
 
   observeEvent(input$restore_default_templates, {
     defaults <- make_default_templates()
     rv$template_registry <- defaults
     rv$next_template_id <- max(defaults$id, na.rm = TRUE) + 1L
-    set_success("Default templates restored.")
+    set_template_success("Default templates restored.")
   })
 
   observeEvent(input$template_name, {
+    # Don't allow template selection changes while already editing a template
+    if (!is.na(rv$editing_template_id)) {
+      return()
+    }
+    
+    # Skip this observer if we just exited template edit mode
+    if (isTRUE(rv$skip_next_template_observer)) {
+      rv$skip_next_template_observer <- FALSE
+      return()
+    }
+
     selected_name <- if (!is.null(input$template_name)) trimws(input$template_name) else ""
 
     if (!nzchar(selected_name)) {
@@ -3754,6 +3954,7 @@ server <- function(input, output, session) {
       updateTextAreaInput(session, "note", value = "")
       rv$value_inputs_refresh <- rv$value_inputs_refresh + 1L
       refresh_post_field_labels()
+      rv$editing_template_id <- NA_integer_
       return()
     }
 
@@ -3796,7 +3997,7 @@ server <- function(input, output, session) {
       return()
     }
 
-    rv$editing_template_id <- tpl$id
+    # Load template values into form for post creation (NOT template editing mode)
     rv$constant_expr_draft <- tpl$constant_expr
     rv$function_expr_draft <- tpl$function_expr
 
@@ -3885,7 +4086,7 @@ server <- function(input, output, session) {
     rv$template_registry <- rv$template_registry %>% filter(id != tpl_id) %>% bind_rows(new_tpl)
     if (is_new) rv$next_template_id <- rv$next_template_id + 1L
     rv$editing_template_id <- NA_integer_
-    set_success(if (is_new) paste("Template saved:", nm) else paste("Template updated:", nm))
+    set_template_success(if (is_new) paste("Template saved:", nm) else paste("Template updated:", nm))
   })
 
   required_value_count <- reactive({
@@ -5233,6 +5434,107 @@ server <- function(input, output, session) {
     rv$editing_id <- NA_integer_
     reset_form()
     set_success("Post reactivated.")
+  })
+
+  observeEvent(input$new_template_btn, {
+    # Clear the template editing mode and prepare form for new template
+    rv$editing_template_id <- NA_integer_
+    rv$skip_next_template_observer <- TRUE
+    reset_form()
+    updateSelectizeInput(session, "template_name", selected = character(0))
+  })
+
+  observeEvent(input$save_template_edit, {
+    # Save the edited/new template
+    rv$templates_error_text <- NULL
+    nm <- trimws(if (!is.null(input$post_name)) input$post_name else "")
+    if (!nzchar(nm)) {
+      rv$templates_error_text <- "Template name is required."
+      return()
+    }
+
+    is_new <- is.na(rv$editing_template_id)
+    tpl_id <- if (is_new) rv$next_template_id else rv$editing_template_id
+    prev <- rv$template_registry %>% filter(id == tpl_id)
+    prev_default <- if (nrow(prev) == 1) isTRUE(prev$is_default) else FALSE
+
+    dup <- rv$template_registry %>% filter(!is_deleted, id != tpl_id, tolower(name) == tolower(nm))
+    if (nrow(dup) > 0) {
+      rv$templates_error_text <- "A template with that name already exists."
+      return()
+    }
+
+    dur_years <- tryCatch({
+      if (!is.null(input$post_date_range) && length(input$post_date_range) == 2 && all(!is.na(input$post_date_range))) {
+        as.numeric(difftime(as.Date(input$post_date_range[2]), as.Date(input$post_date_range[1]), units = "days")) / 365.25
+      } else {
+        NA_real_
+      }
+    }, error = function(e) NA_real_)
+
+    n_vals <- isolate(required_value_count())
+    var_vals <- lapply(seq_len(n_vals), function(i) {
+      v <- input[[paste0("var_value_", i)]]
+      if (is.null(v) || is.na(v)) 0 else as.numeric(v)
+    })
+
+    new_tpl <- tibble(
+      id             = as.integer(tpl_id),
+      name           = nm,
+      site           = as.character(input$center %||% ""),
+      category       = as.character(input$category %||% ""),
+      value_mode     = as.character(input$value_mode %||% "variable"),
+      value_unit     = as.character(input$value_unit %||% "month"),
+      numeric_mode   = as.character(input$numeric_input_mode %||% "single"),
+      constant_val   = if (is.null(input$constant_expr)) 0 else as.numeric(input$constant_expr),
+      function_expr  = as.character(input$function_expr %||% ""),
+      multiply_fte   = isTRUE(input$multiply_by_fte),
+      apply_inflat   = isTRUE(input$apply_inflation),
+      note           = as.character(input$note %||% ""),
+      duration_years = dur_years,
+      is_default     = prev_default,
+      is_deleted     = FALSE,
+      is_edited      = if (is_new) FALSE else prev_default,
+      values         = list(unlist(var_vals)),
+      application_status = if (!is.null(input$application_status)) input$application_status else "Applied for"
+    )
+
+    rv$template_registry <- rv$template_registry %>% filter(id != tpl_id) %>% bind_rows(new_tpl)
+    if (is_new) rv$next_template_id <- rv$next_template_id + 1L
+    
+    # FIRST: Clear template selection while still in edit mode (observer will return early)
+    updateSelectizeInput(session, "template_name", selected = character(0))
+    
+    # Set flag to skip the next template_name observer firing
+    rv$skip_next_template_observer <- TRUE
+    
+    # THEN: Exit edit mode
+    rv$editing_template_id <- NA_integer_
+    
+    # FINALLY: Reset form (skip template_name to avoid redundant update)
+    reset_form(skip_template_name = TRUE)
+    
+    set_template_success(if (is_new) paste("Template saved:", nm) else paste("Template updated:", nm))
+  })
+
+  observeEvent(input$cancel_template_edit, {
+    # Cancel template editing and clear form
+    rv$editing_template_id <- NA_integer_
+    rv$skip_next_template_observer <- TRUE
+    reset_form()
+    updateSelectizeInput(session, "template_name", selected = character(0))
+  })
+
+  # Handle cancel post edit button
+  observeEvent(input$cancel_post_edit, {
+    rv$editing_id <- NA_integer_
+    reset_form()
+  })
+
+  # Disable template selection when already editing a template
+  observeEvent(rv$editing_template_id, {
+    # When editing a template, we'll just keep the UI as-is but the observer will ignore changes
+    # When not editing, allow normal template selection
   })
 
   observeEvent(input$add_or_update, {
