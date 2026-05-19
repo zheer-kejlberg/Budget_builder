@@ -1044,6 +1044,9 @@ post_total <- function(post_row, all_posts_tbl = post_row, salaries_lookup = dat
 
 serialize_posts <- function(posts_tbl) {
   posts_tbl %>%
+    select(id, center, post_name, category, start_date, end_date, fte, value_mode, value_unit, 
+           constant_expr, function_expr, value_vector, salary_selected, salary_field_selected, numeric_input_mode, multiply_by_fte, 
+           sum_multiplier, sum_sites, sum_statuses, sum_posts, note, needs_amendment, application_status, import_issues) %>%
     mutate(
       start_date = as.character(start_date),
       end_date = as.character(end_date),
@@ -1056,7 +1059,8 @@ serialize_inactive_posts <- function(posts_tbl) {
   
   posts_tbl %>%
     select(id, center, post_name, category, start_date, end_date, fte, value_mode, value_unit, 
-           constant_expr, function_expr, value_vector, salary_selected, salary_field_selected, numeric_input_mode, multiply_by_fte, note, needs_amendment, application_status, import_issues) %>%
+           constant_expr, function_expr, value_vector, salary_selected, salary_field_selected, numeric_input_mode, multiply_by_fte, 
+           sum_multiplier, sum_sites, sum_statuses, sum_posts, note, needs_amendment, application_status, import_issues) %>%
     mutate(
       start_date = as.character(start_date),
       end_date = as.character(end_date),
@@ -1073,7 +1077,8 @@ parse_inactive_posts <- function(posts_tbl) {
   required <- c(
     "id", "center", "post_name", "category", "start_date", "end_date",
     "fte", "value_mode", "value_unit", "constant_expr", "function_expr",
-    "value_vector", "salary_selected", "salary_field_selected", "numeric_input_mode", "multiply_by_fte", "note", "needs_amendment", "application_status", "import_issues"
+    "value_vector", "salary_selected", "salary_field_selected", "numeric_input_mode", "multiply_by_fte", 
+    "sum_multiplier", "sum_sites", "sum_statuses", "sum_posts", "note", "needs_amendment", "application_status", "import_issues"
   )
 
   if (!all(required %in% names(posts_tbl))) {
@@ -1084,6 +1089,10 @@ parse_inactive_posts <- function(posts_tbl) {
         salary_selected = "",
         salary_field_selected = "",
         multiply_by_fte = TRUE,
+        sum_multiplier = "",
+        sum_sites = "",
+        sum_statuses = "",
+        sum_posts = "",
         NA
       )
     }
@@ -1096,6 +1105,7 @@ parse_inactive_posts <- function(posts_tbl) {
       fte = as.numeric(fte),
       id = as.integer(id),
       needs_amendment = as.logical(needs_amendment),
+      multiply_by_fte = as.logical(multiply_by_fte),
       value_vector = strsplit(ifelse(is.na(value_vector), "", value_vector), ";", fixed = TRUE),
       value_vector = map(value_vector, ~ as.numeric(.x[nzchar(.x)])),
       application_status = {
@@ -1114,7 +1124,8 @@ parse_posts <- function(posts_tbl) {
   required <- c(
     "id", "center", "post_name", "category", "start_date", "end_date",
     "fte", "value_mode", "value_unit", "constant_expr", "function_expr",
-    "value_vector", "salary_selected", "salary_field_selected", "numeric_input_mode", "multiply_by_fte", "note", "needs_amendment", "application_status"
+    "value_vector", "salary_selected", "salary_field_selected", "numeric_input_mode", "multiply_by_fte", 
+    "sum_multiplier", "sum_sites", "sum_statuses", "sum_posts", "note", "needs_amendment", "application_status"
   )
 
   if (!all(required %in% names(posts_tbl))) {
@@ -1137,6 +1148,10 @@ parse_posts <- function(posts_tbl) {
         salary_field_selected = "",
         numeric_input_mode = "single",
         multiply_by_fte = TRUE,
+        sum_multiplier = "",
+        sum_sites = "",
+        sum_statuses = "",
+        sum_posts = "",
         note = "",
         needs_amendment = FALSE,
         application_status = "Applied for",
@@ -2943,7 +2958,10 @@ server <- function(input, output, session) {
         unit = input$salary_unit,
         pension_mode = input$salary_pension_mode,
         pension_value = input$salary_pension_value,
-        own_pension_pct = input$salary_own_pension_pct
+        own_pension_pct = input$salary_own_pension_pct,
+        wage_supplement = input$salary_wage_supplement,
+        holiday_rate_pct = input$salary_holiday_rate,
+        subtract_holiday = input$salary_subtract_holiday
       ),
       error = function(e) {
         rv$salary_error_text <- e$message
@@ -5136,6 +5154,8 @@ server <- function(input, output, session) {
       return()
     }
     rv$posts <- rv$posts %>% filter(id != sid)
+    rv$editing_id <- NA_integer_
+    reset_form()
     set_success("Post deleted.")
   })
 
@@ -5157,8 +5177,14 @@ server <- function(input, output, session) {
       return()
     }
     row_to_deactivate <- rv$posts %>% filter(id == sid)
+    if (nrow(row_to_deactivate) == 0) {
+      rv$form_error_text <- "Post not found or already inactive."
+      return()
+    }
     rv$posts <- rv$posts %>% filter(id != sid)
     rv$inactive_posts <- bind_rows(rv$inactive_posts, row_to_deactivate)
+    rv$editing_id <- NA_integer_
+    reset_form()
     set_success("Post made inactive.")
   })
 
@@ -5166,11 +5192,17 @@ server <- function(input, output, session) {
     sid <- input$activate_post_id
     if (is.null(sid) || is.na(sid)) return()
     row_to_activate <- rv$inactive_posts %>% filter(id == sid)
+    if (nrow(row_to_activate) == 0) {
+      rv$form_error_text <- "Post not found in inactive posts."
+      return()
+    }
     req(nrow(row_to_activate) == 1)
     
     # Normal activation for user-inactivated posts
     rv$inactive_posts <- rv$inactive_posts %>% filter(id != sid)
     rv$posts <- bind_rows(rv$posts, row_to_activate)
+    rv$editing_id <- NA_integer_
+    reset_form()
     set_success("Post reactivated.")
   })
 
