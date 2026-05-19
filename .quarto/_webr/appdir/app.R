@@ -4180,23 +4180,21 @@ server <- function(input, output, session) {
         character(0)
       }
     } else {
-      # At least one filter is set - apply both (OR logic: at least one must be true)
-      # But if only sites set, show posts from those sites
-      # If only statuses set, show posts with those statuses
-      if (is.null(selected_sites) || length(selected_sites) == 0) {
-        selected_sites <- unique(rv$site_registry$name[!rv$site_registry$is_deleted])
-      }
-      if (is.null(selected_statuses) || length(selected_statuses) == 0) {
-        selected_statuses <- c("Applied for", "Applied for elsewhere", "Not applied for", "Funded")
-      }
-      
+      # At least one filter is set - use exactly what user selected (no forced defaults)
       if (nrow(rv$posts) > 0) {
-        rv$posts %>%
-          filter(
-            value_mode != "sum",
-            center %in% selected_sites,
-            application_status %in% selected_statuses
-          ) %>%
+        result <- rv$posts %>% filter(value_mode != "sum")
+        
+        # Filter by sites if any are selected
+        if (!is.null(selected_sites) && length(selected_sites) > 0) {
+          result <- result %>% filter(center %in% selected_sites)
+        }
+        
+        # Filter by statuses if any are selected
+        if (!is.null(selected_statuses) && length(selected_statuses) > 0) {
+          result <- result %>% filter(application_status %in% selected_statuses)
+        }
+        
+        result %>%
           mutate(label = paste0(post_name, " (", center, ")")) %>%
           pull(label)
       } else {
@@ -4207,7 +4205,32 @@ server <- function(input, output, session) {
   
   # Observer to auto-sync post selection when sites/statuses filters change
   # Keeps selected posts in sync: keeps valid posts, adds new matching posts
-  observeEvent(c(input$sum_sites, input$sum_statuses), {
+  # DISABLED: This was causing infinite loops when removing sites/statuses
+  # Users should manually select/deselect posts they want to include
+  # observeEvent(c(input$sum_sites, input$sum_statuses), {
+  #   available <- sum_mode_filtered_posts()
+  #   current_selection <- isolate(input$sum_posts %||% character(0))
+  #   
+  #   # Keep posts that are still available, add all newly available posts
+  #   still_valid <- intersect(current_selection, available)
+  #   posts_to_add <- setdiff(available, current_selection)
+  #   new_selection <- union(still_valid, posts_to_add)
+  #   
+  #   # Only update if selection actually changed
+  #   if (!identical(sort(new_selection), sort(current_selection))) {
+  #     updateSelectizeInput(session, "sum_posts",
+  #                         choices = available,
+  #                         selected = new_selection)
+  #   }
+  # }, ignoreInit = TRUE, priority = 100)
+  
+  # Create a debounced reactive that waits 250ms after filter changes stop
+  sum_filters_debounced <- debounce(reactive({
+    list(sites = input$sum_sites, statuses = input$sum_statuses)
+  }), 250)
+  
+  # Auto-populate sum_posts when sites/statuses change (with debouncing to prevent loops)
+  observeEvent(sum_filters_debounced(), {
     available <- sum_mode_filtered_posts()
     current_selection <- isolate(input$sum_posts %||% character(0))
     
@@ -4216,12 +4239,12 @@ server <- function(input, output, session) {
     posts_to_add <- setdiff(available, current_selection)
     new_selection <- union(still_valid, posts_to_add)
     
-    # Only update if selection actually changed
-    if (!identical(sort(new_selection), sort(current_selection))) {
-      updateSelectizeInput(session, "sum_posts",
-                          choices = available,
-                          selected = new_selection)
-    }
+    
+    
+    # Always update (both choices and selection together in one atomic update)
+    updateSelectizeInput(session, "sum_posts",
+                        choices = available,
+                        selected = new_selection)
   }, ignoreInit = TRUE, priority = 100)
   
   output$value_inputs_ui <- renderUI({
@@ -5213,11 +5236,11 @@ server <- function(input, output, session) {
 
   observeEvent(input$sum_sites, {
     rv$sum_sites_draft <- input$sum_sites
-  }, ignoreInit = TRUE)
+  }, ignoreInit = TRUE, priority = 50)
 
   observeEvent(input$sum_statuses, {
     rv$sum_statuses_draft <- input$sum_statuses
-  }, ignoreInit = TRUE)
+  }, ignoreInit = TRUE, priority = 50)
 
   observeEvent(input$sum_posts, {
     rv$sum_posts_draft <- input$sum_posts
