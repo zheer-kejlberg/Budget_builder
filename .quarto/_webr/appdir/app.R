@@ -1734,6 +1734,8 @@ ui <- fluidPage(
         // string instead of a one-element array.
         var columns = Array.isArray(rawCols) ? rawCols : (rawCols ? [rawCols] : []);
         var meta = Array.isArray(sheetInfo) ? {} : (sheetInfo.meta || {});
+        
+
 
         var ws;
         var colNames;
@@ -1753,36 +1755,51 @@ ui <- fluidPage(
 
         if (rows.length > 0) {
           var range = XLSX.utils.decode_range(ws['!ref']);
-
-          // Collect total column indices (0-based)
-          var totalColIdx = [];
-          colNames.forEach(function(name, idx) {
-            if (/total/i.test(name)) totalColIdx.push(idx);
-          });
-
-          // Total row: last data row when meta.hasTotalRow is true
-          var totalRowSheetIdx = (meta.hasTotalRow && rows.length > 0)
-            ? range.e.r  // last row in sheet = header + data rows - 1
-            : -1;
+          var colMeta = (meta.colMeta || {});
+          var rowMeta = (meta.rowMeta || []);
 
           for (var R = range.s.r; R <= range.e.r; R++) {
+            var isHeader = (R === range.s.r);
+            var dataRowIdx = R - 1;  // row index in rowMeta (data rows start at index 0)
+            var rowMetaEntry = (dataRowIdx >= 0 && dataRowIdx < rowMeta.length) ? rowMeta[dataRowIdx] : null;
+            var isRowTotal = rowMetaEntry && rowMetaEntry.isTotalRow;
+
             for (var C = range.s.c; C <= range.e.c; C++) {
               var addr = XLSX.utils.encode_cell({r: R, c: C});
               if (!ws[addr]) ws[addr] = {v: '', t: 's'};
 
-              var isHeader   = (R === range.s.r);
-              var isTotalRow = (R === totalRowSheetIdx);
-              var isTotalCol = totalColIdx.indexOf(C) !== -1;
-              var bold = isTotalRow || (isHeader && isTotalCol) || isTotalCol;
+              var colIdxStr = String(C);
+              var colMetaEntry = colMeta[colIdxStr] || {};
+              var isNonAppliedFor = colMetaEntry.isNonAppliedFor;
+              var colName = columns.length > C ? columns[C] : '';
+              var isTotalCol = colName === 'All sites > Total' || /> Site total$/.test(colName);
+              
+              var style = {};
+              
+              // Apply italic for non-Applied for posts (all rows including header)
+              if (isNonAppliedFor) {
+                if (!style.font) style.font = {};
+                style.font.italic = true;
+              }
 
-              if (bold || isTotalRow) {
-                ws[addr].s = {
-                  font: { bold: bold },
-                  border: isTotalRow ? {
-                    top:    { style: 'thin',   color: { rgb: 'FF000000' } },
-                    bottom: { style: 'double', color: { rgb: 'FF000000' } }
-                  } : {}
+              // Apply bold for site total and grand total columns
+              if (isTotalCol) {
+                if (!style.font) style.font = {};
+                style.font.bold = true;
+              }
+              
+              // Apply grey background for total rows
+              if (isRowTotal) {
+                style.fill = { fgColor: { rgb: 'FFC0C0C0' } };
+                style.border = {
+                  top:    { style: 'thin', color: { rgb: 'FF000000' } },
+                  bottom: { style: 'thin', color: { rgb: 'FF000000' } }
                 };
+              }
+              
+              // Only set style if there's something to apply
+              if (Object.keys(style).length > 0) {
+                ws[addr].s = style;
               }
             }
           }
@@ -6664,7 +6681,7 @@ server <- function(input, output, session) {
     }
 
     meta <- posts_data %>%
-      select(id, start_date, end_date, note)
+      select(id, start_date, end_date, note, application_status)
 
     out <- long %>%
       left_join(meta, by = "id") %>%
@@ -6683,7 +6700,7 @@ server <- function(input, output, session) {
         FTE = fte,
         Amount = value
       ) %>%
-      select(Period, `Post name`, Site, Category, Note, `Start Date`, `End date`, FTE, Amount)
+      select(Period, `Post name`, Site, Category, Note, `Start Date`, `End date`, FTE, Amount, application_status)
 
     if (is.null(squash_dims)) squash_dims <- character(0)
 
@@ -6698,7 +6715,8 @@ server <- function(input, output, session) {
     if (!("Post name" %in% squash_dims)) group_cols <- c(group_cols, "Post name")
     if (!("Site" %in% squash_dims)) group_cols <- c(group_cols, "Site")
     if (!("Category" %in% squash_dims)) group_cols <- c(group_cols, "Category")
-    if (length(group_cols) == 0) group_cols <- "Period"
+    group_cols <- c(group_cols, "application_status")
+    if (length(group_cols) == 1) group_cols <- c("Period", "application_status")  # default: at least Period and status
 
     out <- out %>%
       group_by(across(all_of(group_cols))) %>%
@@ -6707,6 +6725,7 @@ server <- function(input, output, session) {
         `Post name` = if ("Post name" %in% group_cols) first(`Post name`) else "All posts",
         Site = if ("Site" %in% group_cols) first(Site) else "All sites",
         Category = if ("Category" %in% group_cols) first(Category) else "All categories",
+        application_status = if ("application_status" %in% group_cols) first(application_status) else NA_character_,
         Note = if (n_distinct(Note) == 1) first(Note) else "Mixed notes",
         `Start Date` = if (n_distinct(`Start Date`) == 1) first(`Start Date`) else as.Date(NA),
         `End date` = if (n_distinct(`End date`) == 1) first(`End date`) else as.Date(NA),
@@ -6725,6 +6744,7 @@ server <- function(input, output, session) {
       `Post name` = "",
       Site = "",
       Category = "",
+      application_status = "",
       Note = "",
       `Start Date` = NA_character_,
       `End date` = NA_character_,
@@ -6735,66 +6755,82 @@ server <- function(input, output, session) {
   }
 
   build_export_wide_sheet_with_data <- function(period_choice, posts_data, budget_start, budget_end, salaries_data, inflation_pct, squash_dims) {
-    long_df <- build_export_sheet_with_data(period_choice, posts_data, budget_start, budget_end, salaries_data, inflation_pct, squash_dims)
-    if (!nrow(long_df)) return(tibble(Period = character()))
-
-    # Strip the TOTAL summary row before pivoting
-    data_rows <- dplyr::filter(long_df, Period != "TOTAL")
-    if (!nrow(data_rows)) return(tibble(Period = character()))
-
-    # Pivot each post to its own column.
-    wide <- tidyr::pivot_wider(
-      dplyr::select(data_rows, Period, Site, `Post name`, Amount),
-      names_from  = c(Site, `Post name`),
-      values_from = Amount,
-      names_sep   = " > ",
-      values_fn   = sum,
-      values_fill = NA_real_
+    # Build long data exactly as build_display_table does, using snapshot params
+    long <- build_long_budget(
+      posts_data, budget_start, budget_end,
+      salaries_lookup = make_salary_lookup(salaries_data),
+      inflation_pct = inflation_pct, salaries_tbl = salaries_data
     )
+    if (!nrow(long)) return(tibble(Period = character()))
 
-    # Add a site-total column immediately after each site's post columns.
-    ordered_cols <- "Period"
-    site_total_cols <- character(0)
-    for (site in unique(data_rows$Site)) {
-      prefix  <- paste0(site, " > ")
-      pcols   <- names(wide)[startsWith(names(wide), prefix)]
-      if (length(pcols) == 0) next
-      tcol <- paste0(site, " > Site total")
-      wide[[tcol]] <- rowSums(as.matrix(wide[, pcols, drop = FALSE]), na.rm = TRUE)
-      site_total_cols <- c(site_total_cols, tcol)
-      ordered_cols <- c(ordered_cols, pcols, tcol)
-    }
+    meta <- posts_data %>%
+      select(id, start_date, end_date, note, needs_amendment, application_status)
 
-    grand_spacer <- strrep(" ", length(unique(data_rows$Site)) + 1)
-    while (grand_spacer %in% names(wide)) {
-      grand_spacer <- paste0(grand_spacer, " ")
-    }
-    wide[[grand_spacer]] <- ""
-    ordered_cols <- c(ordered_cols, grand_spacer)
+    out <- long %>%
+      left_join(meta, by = "id") %>%
+      mutate(
+        Period = case_when(
+          period_choice == "month" ~ period_month,
+          period_choice == "calendar_year" ~ as.character(calendar_year),
+          TRUE ~ paste0("Year ", project_year)
+        ),
+        `Post name` = post_name,
+        Site = center,
+        Category = category,
+        Note = note,
+        `Start Date` = start_date,
+        `End date` = end_date,
+        FTE = fte,
+        Value = value,
+        needs_amendment = needs_amendment,
+        application_status = if_else(is.na(application_status), "Applied for", application_status)
+      ) %>%
+      select(id, Period, `Post name`, Site, Category, Note, `Start Date`, `End date`, FTE, Value, needs_amendment, application_status)
 
-    grand_total_col <- "All sites > Total"
-    if (length(site_total_cols) > 0) {
-      wide[[grand_total_col]] <- rowSums(as.matrix(wide[, site_total_cols, drop = FALSE]), na.rm = TRUE)
-    } else {
-      wide[[grand_total_col]] <- NA_real_
-    }
-    ordered_cols <- c(ordered_cols, grand_total_col)
+    # Apply squash dimensions (mirrors build_display_table)
+    if (is.null(squash_dims)) squash_dims <- character(0)
+    if ("Period" %in% squash_dims) out$Period <- "All periods"
+    if ("Post name" %in% squash_dims) { out$`Post name` <- "All posts"; out$Note <- "Mixed notes" }
+    if ("Site" %in% squash_dims) out$Site <- "All sites"
+    if ("Category" %in% squash_dims) out$Category <- "All categories"
 
-    wide <- wide[, ordered_cols, drop = FALSE]
+    group_cols <- c()
+    if (!("Period" %in% squash_dims)) group_cols <- c(group_cols, "Period")
+    if (!("Post name" %in% squash_dims)) group_cols <- c(group_cols, "Post name")
+    if (!("Site" %in% squash_dims)) group_cols <- c(group_cols, "Site")
+    if (!("Category" %in% squash_dims)) group_cols <- c(group_cols, "Category")
+    if (length(group_cols) == 0) group_cols <- "Period"
 
-    # Append a grand TOTAL row.
-    num_cols <- names(wide)[vapply(wide, is.numeric, logical(1))]
-    total_row <- as.list(rep(NA, ncol(wide)))
-    names(total_row) <- names(wide)
-    total_row$Period <- "TOTAL"
-    for (col in num_cols) {
-      total_row[[col]] <- sum(wide[[col]], na.rm = TRUE)
-    }
-    for (col in names(wide)[vapply(wide, is.character, logical(1))]) {
-      if (grepl("^\\s+$", col)) total_row[[col]] <- ""
-    }
-    dplyr::bind_rows(wide, tibble::as_tibble(total_row))
+    # Aggregate exactly as build_display_table does (same summarise body)
+    out <- out %>%
+      group_by(across(all_of(group_cols))) %>%
+      summarise(
+        Period = if ("Period" %in% group_cols) first(Period) else "All periods",
+        `Post name` = if ("Post name" %in% group_cols) first(`Post name`) else "All posts",
+        Site = if ("Site" %in% group_cols) first(Site) else "All sites",
+        Category = if ("Category" %in% group_cols) first(Category) else "All categories",
+        Note = if (n_distinct(Note) == 1) first(Note) else "Mixed notes",
+        `Start Date` = if (n_distinct(`Start Date`) == 1) first(`Start Date`) else as.Date(NA),
+        `End date` = if (n_distinct(`End date`) == 1) first(`End date`) else as.Date(NA),
+        FTE = if (n_distinct(FTE) == 1) first(FTE) else NA_real_,
+        Value = sum(Value),
+        needs_amendment = any(needs_amendment, na.rm = TRUE),
+        id = min(id),
+        application_status = first(application_status),
+        .groups = "drop"
+      ) %>%
+      transmute(id, Period, `Post name`, Site, Category, Note, `Start Date`, `End date`, FTE, Amount = Value, needs_amendment, application_status) %>%
+      arrange(Site, `Post name`, Period)
+
+    # Delegate to the existing proven pivot function (same as the app display)
+    wide_obj <- build_wide_from_long(out, include_site_totals = TRUE, column_mode = "post")
+
+    result <- wide_obj$data
+    attr(result, "post_col_status") <- wide_obj$post_col_status
+    attr(result, "status_total_labels") <- wide_obj$status_total_labels
+    result
   }
+
 
   build_export_sheet <- function(period_choice) {
     if (!nrow(rv$posts)) {
@@ -6969,16 +7005,54 @@ server <- function(input, output, session) {
   }
 
   to_js_sheet <- function(df, has_total_row = FALSE) {
+    # Extract metadata attributes if they exist
+    post_col_status <- attr(df, "post_col_status") %||% character(0)
+    status_total_labels <- attr(df, "status_total_labels") %||% character(0)
+    
+    # Build colMeta: for each column, track if it's a non-"Applied for" post
+    colMeta <- list()
+    for (i in seq_along(names(df))) {
+      col_name <- names(df)[i]
+      col_idx <- as.character(i - 1)  # 0-based index for JavaScript
+      status <- post_col_status[col_name] %||% NA_character_
+      
+      # Mark columns that are not "Applied for" posts
+      if (!is.na(status) && status != "Applied for") {
+        colMeta[[col_idx]] <- list(isNonAppliedFor = TRUE)
+      } else {
+        colMeta[[col_idx]] <- list(isNonAppliedFor = FALSE)
+      }
+    }
+    
+    # Build rowMeta: for each row, track if it's a status total row or grand total
+    rowMeta <- list()
+    periods <- df$Period
+    for (i in seq_along(periods)) {
+      period_val <- periods[i]
+      is_status_total <- period_val %in% status_total_labels
+      is_grand_total <- period_val == "TOTAL"
+      
+      rowMeta[[i]] <- list(
+        isStatusTotal = is_status_total,
+        isGrandTotal = is_grand_total,
+        isTotalRow = is_status_total || is_grand_total
+      )
+    }
+    
     list(
-      # as.list() forces a JSON array even when there is only one column name,
-      # preventing Shiny from serialising it as a bare scalar string.
       columns = as.list(names(df)),
       rows = if (!nrow(df)) {
         list()
       } else {
-        lapply(seq_len(nrow(df)), function(i) unname(as.list(df[i, , drop = FALSE])))
+        lapply(seq_len(nrow(df)), function(i) {
+          lapply(unname(as.list(df[i, , drop = FALSE])), unname)
+        })
       },
-      meta = list(hasTotalRow = has_total_row)
+      meta = list(
+        hasTotalRow = has_total_row,
+        colMeta = colMeta,
+        rowMeta = rowMeta
+      )
     )
   }
 
@@ -7029,10 +7103,10 @@ server <- function(input, output, session) {
         sheets <- list(
           by_project_year_wide  = to_js_sheet(build_export_wide_sheet_with_data("project_year",  posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
           by_project_year_long  = to_js_sheet(build_export_sheet_with_data("project_year",       posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
-          by_calendar_year_wide = to_js_sheet(build_export_wide_sheet_with_data("calendar_year", posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
-          by_calendar_year_long = to_js_sheet(build_export_sheet_with_data("calendar_year",      posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
-          by_month_wide         = to_js_sheet(build_export_wide_sheet_with_data("month",         posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
-          by_month_long         = to_js_sheet(build_export_sheet_with_data("month",              posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
+          #by_calendar_year_wide = to_js_sheet(build_export_wide_sheet_with_data("calendar_year", posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
+          #by_calendar_year_long = to_js_sheet(build_export_sheet_with_data("calendar_year",      posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
+          #by_month_wide         = to_js_sheet(build_export_wide_sheet_with_data("month",         posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
+          #by_month_long         = to_js_sheet(build_export_sheet_with_data("month",              posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
           posts                 = to_js_sheet(serialize_posts(posts_snapshot)),
           inactive_posts        = to_js_sheet(serialize_inactive_posts(isolate(rv$inactive_posts))),
           salaries              = to_js_sheet(serialize_salaries(salaries_copy)),
