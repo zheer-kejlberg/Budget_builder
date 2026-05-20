@@ -1911,9 +1911,8 @@ ui &lt;- fluidPage(
     Shiny.addCustomMessageHandler('save-pdf', function(payload) {
       if (typeof window.jspdf === 'undefined') { console.error('jsPDF not loaded'); return; }
 
-      var vizEl = document.getElementById('visualization_plot');
       var dtWrapper = document.querySelector('#wide_form_table .dataTables_wrapper');
-      if (!dtWrapper || !vizEl) { console.warn('Elements not found'); return; }
+      if (!dtWrapper) { console.warn('DataTable not found'); return; }
 
       var headTable = dtWrapper.querySelector('.dataTables_scrollHead table.dataTable');
       var bodyTable = dtWrapper.querySelector('.dataTables_scrollBody table.dataTable');
@@ -2090,48 +2089,205 @@ ui &lt;- fluidPage(
         });
       });
 
-      // Draw body rows
+      // Draw body rows with alternating row colors for site separation
       var yy = totalHeadH;
-      bodyRows.forEach(function(row) {
+      bodyRows.forEach(function(row, rowIdx) {
         var col = 0;
+        var shouldHighlight = rowIdx % 2 === 0;
         row.forEach(function(cell) {
           var span = Math.min(cell.cs || 1, nCols - col);
           var cw2 = 0;
           for (var k = 0; k &lt; span; k++) { if (col + k &lt; nCols) cw2 += colWidths[col + k]; }
+          var bg = cell.bg;
+          if (bg === 'rgb(255,255,255)' &amp;&amp; shouldHighlight) {
+            bg = '#f9f9f9';
+          }
           drawCell(colX[col], cw2, yy, BODY_ROW_H, cell.text, {
-            bg: cell.bg, bold: cell.bold, italic: cell.italic, color: cell.color, align: cell.align
+            bg: bg, bold: cell.bold, italic: cell.italic, color: cell.color, align: cell.align
           });
           col += span;
         });
         yy += BODY_ROW_H;
       });
 
-      // Capture visualization via Plotly.toImage for full-width output at any resolution
+      // Now capture visualizations
       var vizW = 1200;
       var vizH = 700;
 
-      Plotly.toImage(vizEl, { format: 'png', width: vizW, height: vizH }).then(function(vizDataUrl) {
-        var jsPDFCtor = window.jspdf.jsPDF;
-        var doc = new jsPDFCtor({ orientation: 'landscape', unit: 'mm', format: 'a3' });
-        var pageW = doc.internal.pageSize.getWidth();
-        var pageH = doc.internal.pageSize.getHeight();
-        var margin = 10;
-        var cW = pageW - 2 * margin;
-        var cH = pageH - 2 * margin;
+      // Helper to capture plot SVG
+      function capturePlot(elementId) {
+        return new Promise(function(resolve) {
+          try {
+            var container = document.getElementById(elementId);
+            if (!container) {
+              console.warn('Container ' + elementId + ' not found');
+              return resolve(null);
+            }
+            
+            var plotElement = container.querySelector('.plotly');
+            if (!plotElement) {
+              console.warn('Plotly element not found in ' + elementId);
+              return resolve(null);
+            }
+            
+            var svg = plotElement.querySelector('svg');
+            if (!svg) {
+              console.warn('SVG not found in ' + elementId);
+              return resolve(null);
+            }
+            
+            var svgWidth = parseFloat(svg.getAttribute('width')) || 1200;
+            var svgHeight = parseFloat(svg.getAttribute('height')) || 700;
+            var aspectRatio = svgHeight / svgWidth;
+            
+            var canvas = document.createElement('canvas');
+            canvas.width = 1200;
+            canvas.height = Math.round(1200 * aspectRatio);
+            var ctx = canvas.getContext('2d');
+            
+            var svgString = new XMLSerializer().serializeToString(svg);
+            var img = new Image();
+            
+            img.onload = function() {
+              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+              resolve(canvas.toDataURL('image/png'));
+            };
+            
+            img.onerror = function() {
+              console.warn('SVG rendering failed for ' + elementId);
+              resolve(null);
+            };
+            
+            img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgString)));
+          } catch(e) {
+            console.error('Exception in capturePlot for ' + elementId + ':', e);
+            resolve(null);
+          }
+        });
+      }
 
-        var tA = tblCanvas.height / tblCanvas.width;
-        var tW = cW; var tH = tW * tA;
-        if (tH &gt; cH) { tH = cH; tW = tH / tA; }
-        doc.addImage(tblCanvas.toDataURL('image/png'), 'PNG', margin + (cW - tW) / 2, margin, tW, tH);
+      // Wait for plots to be ready
+      setTimeout(function() {
+        console.log('Starting PDF generation...');
+        
+        // Convert table canvas to image
+        var tblImg = tblCanvas.toDataURL('image/png');
+        
+        Promise.all([
+          Promise.resolve(tblImg),       // images[0]: Budget table
+          capturePlot('viz_applied_for'),    // images[1]: Applied for
+          capturePlot('viz_funded'),         // images[2]: Funded
+          capturePlot('viz_applied_elsewhere'), // images[3]: Applied elsewhere
+          capturePlot('viz_not_applied'),    // images[4]: Not applied
+          capturePlot('viz_all'),            // images[5]: All statuses
+          capturePlot('analytics_status_breakdown'), // images[6]: Status breakdown
+          capturePlot('analytics_budget_by_category') // images[7]: Budget by category
+        ]).then(function(images) {
+          console.log('Captured images, creating PDF...');
+          
+          var jsPDFCtor = window.jspdf.jsPDF;
+          var doc = new jsPDFCtor({ orientation: 'landscape', unit: 'mm', format: 'a3' });
+          var pageW = doc.internal.pageSize.getWidth();
+          var pageH = doc.internal.pageSize.getHeight();
+          var margin = 10;
+          var cW = pageW - 2 * margin;
+          var cH = pageH - 2 * margin;
 
-        doc.addPage();
-        var vRatio = vizH / vizW;
-        var vW = cW; var vH = vW * vRatio;
-        if (vH &gt; cH) { vH = cH; vW = vH / vRatio; }
-        doc.addImage(vizDataUrl, 'PNG', margin + (cW - vW) / 2, margin, vW, vH);
+          // Page 1: Budget Summary Table
+          doc.setFontSize(14);
+          doc.text('Budget Summary', margin + 10, margin + 15);
+          
+          if (images[0]) {
+            var tableAspect = doc.getImageProperties(images[0]).height / doc.getImageProperties(images[0]).width;
+            var tableW = cW - 20;
+            var tableH = tableW * tableAspect;
+            doc.addImage(images[0], 'PNG', margin + 10, margin + 25, tableW, tableH);
+          } else {
+            doc.setFontSize(10);
+            doc.text('Budget table not available', margin + 10, margin + 30);
+          }
+          
+          // Page 2: Applied for visualization
+          doc.addPage();
+          doc.setFontSize(12);
+          doc.text('Applied for Status', margin + 10, margin + 15);
+          if (images[1]) {
+            doc.addImage(images[1], 'PNG', margin, margin + 25, cW - 20, (cW - 20) * 0.583);
+          } else {
+            doc.text('Visualization not available', margin + 10, margin + 30);
+          }
 
-        doc.save(payload.filename || 'budget.pdf');
-      });
+          // Page 3: 2x2 grid (Funded, Applied elsewhere, Not applied, All statuses)
+          doc.addPage();
+          doc.setFontSize(12);
+          doc.text('All Funding Statuses Overview', margin + 10, margin + 15);
+          
+          var gridW = (cW - 20) / 2;
+          var gridH = (cH - 60) / 2;
+          
+          // Helper to add image maintaining aspect ratio
+          function addImageWithAspect(img, x, y, maxW, maxH) {
+            if (!img) return false;
+            var dims = doc.getImageProperties(img);
+            var imgAspect = dims.height / dims.width;
+            var targetW = maxW;
+            var targetH = maxW * imgAspect;
+            if (targetH &gt; maxH) {
+              targetH = maxH;
+              targetW = maxH / imgAspect;
+            }
+            doc.addImage(img, 'PNG', x + (maxW - targetW) / 2, y, targetW, targetH);
+            return true;
+          }
+          
+          var gridPlots = [
+            { img: images[2], label: 'Funded', x: margin + 10, y: margin + 25 },
+            { img: images[3], label: 'Applied Elsewhere', x: margin + 10 + gridW + 10, y: margin + 25 },
+            { img: images[4], label: 'Not Applied for', x: margin + 10, y: margin + 25 + gridH + 10 },
+            { img: images[5], label: 'All Statuses', x: margin + 10 + gridW + 10, y: margin + 25 + gridH + 10 }
+          ];
+          
+          gridPlots.forEach(function(plot) {
+            doc.setFontSize(9);
+            doc.text(plot.label, plot.x + 5, plot.y);
+            if (plot.img) {
+              addImageWithAspect(plot.img, plot.x, plot.y + 5, gridW - 5, gridH - 15);
+            } else {
+              doc.setFontSize(8);
+              doc.text('Not available', plot.x + 5, plot.y + 20);
+            }
+          });
+
+          // Page 4: Analytics
+          doc.addPage();
+          doc.setFontSize(12);
+          doc.text('Analytics', margin + 10, margin + 15);
+          
+          var analyticsH = (cH - 80) / 2;
+          var analyticsY = margin + 30;
+          var analytics = [
+            { img: images[6], label: 'Budget by Funding Status' },
+            { img: images[7], label: 'Budget by Category' }
+          ];
+          
+          analytics.forEach(function(chart) {
+            doc.setFontSize(10);
+            doc.text(chart.label, margin + 10, analyticsY);
+            if (chart.img) {
+              addImageWithAspect(chart.img, margin, analyticsY + 5, cW - 20, analyticsH - 15);
+            } else {
+              doc.setFontSize(8);
+              doc.text('Not available', margin + 10, analyticsY + 10);
+            }
+            analyticsY += analyticsH + 5;
+          });
+
+          doc.save(payload.filename || 'budget.pdf');
+          console.log('PDF saved successfully');
+        }).catch(function(err) {
+          console.error('Error generating PDF:', err);
+        });
+      }, 2500); // Wait 2.5 seconds for plots and table to render
     });
     "
   ))),
@@ -4690,14 +4846,71 @@ server &lt;- function(input, output, session) {
 
   output$visualization_section &lt;- renderUI({
     if (nrow(rv$posts) == 0) return(NULL)
+    
+    # Build list of tabs to show (only those with data)
+    tabs_to_show &lt;- list()
+    
+    if (nrow(visualization_data_applied_for()) &gt; 0) {
+      tabs_to_show[[length(tabs_to_show) + 1]] &lt;- tabPanel("Applied for", plotlyOutput("viz_applied_for", height = "600px", width = "100%"))
+    }
+    if (nrow(visualization_data_funded()) &gt; 0) {
+      tabs_to_show[[length(tabs_to_show) + 1]] &lt;- tabPanel("Funded", plotlyOutput("viz_funded", height = "600px", width = "100%"))
+    }
+    if (nrow(visualization_data_applied_elsewhere()) &gt; 0) {
+      tabs_to_show[[length(tabs_to_show) + 1]] &lt;- tabPanel("Applied elsewhere", plotlyOutput("viz_applied_elsewhere", height = "600px", width = "100%"))
+    }
+    if (nrow(visualization_data_not_applied()) &gt; 0) {
+      tabs_to_show[[length(tabs_to_show) + 1]] &lt;- tabPanel("Not applied for", plotlyOutput("viz_not_applied", height = "600px", width = "100%"))
+    }
+    if (nrow(visualization_data_all()) &gt; 0) {
+      tabs_to_show[[length(tabs_to_show) + 1]] &lt;- tabPanel("All", plotlyOutput("viz_all", height = "600px", width = "100%"))
+    }
+    
+    # Analytics tab
+    tabs_to_show[[length(tabs_to_show) + 1]] &lt;- tabPanel(
+      "Analytics",
+      tags$div(
+        style = "display: flex; flex-direction: column; gap: 30px; padding: 20px;",
+        tags$div(
+          style = "margin-top: 10px;",
+          plotlyOutput("analytics_status_breakdown", height = "500px")
+        ),
+        tags$div(
+          style = "margin-top: 10px;",
+          plotlyOutput("analytics_budget_by_category", height = "500px")
+        )
+      )
+    )
+    
+    n_tabs &lt;- length(tabs_to_show)
+    tab_width &lt;- 100 / n_tabs
+    
     tagList(
+      tags$style(HTML(paste0("
+        .nav-tabs { 
+          display: flex !important; 
+          flex-wrap: nowrap !important;
+          border-bottom: 1px solid #ddd;
+        }
+        .nav-tabs li {
+          flex: 1 1 ", tab_width, "% !important;
+          margin-bottom: -1px;
+        }
+        .nav-tabs li a {
+          text-align: center;
+          display: block;
+          padding: 10px 5px !important;
+          font-size: 13px;
+          word-wrap: break-word;
+        }
+      "))),
       tags$div(
         style = "display: flex; justify-content: space-between; align-items: baseline;",
         h4("Visualization"),
         if (isTRUE(input$display_form == "wide"))
-          actionButton("save_pdf_btn", "Save PDF", class = "btn-default btn-sm", icon = icon("file-pdf"))
+          actionButton("save_pdf_btn", "Save PDF (4 pages)", class = "btn-default btn-sm", icon = icon("file-pdf"))
       ),
-      plotlyOutput("visualization_plot", height = "600px", width = "100%")
+      do.call(tabsetPanel, tabs_to_show)
     )
   })
 
@@ -5948,115 +6161,264 @@ server &lt;- function(input, output, session) {
   })
 
   # Visualization data: aggregate by month, site, and category for stacked area chart
-  visualization_data &lt;- reactive({
+  # Individual status-filtered visualization reactives
+  create_status_filtered_viz &lt;- function(target_status) {
+    reactive({
+      long_df &lt;- build_long_budget(rv$posts, input$budget_start, input$budget_end, salaries_lookup = make_salary_lookup(rv$salaries), inflation_pct = input$inflation_pct, salaries_tbl = rv$salaries)
+      
+      if (!nrow(long_df)) {
+        return(tibble(month = as.Date(character()), center = character(), category = character(), value = numeric(), facet = character()))
+      }
+
+      if (!is.null(input$filter_month_range) &amp;&amp; all(!is.na(input$filter_month_range))) {
+        mstart &lt;- as.Date(input$filter_month_range[1])
+        mend &lt;- as.Date(input$filter_month_range[2])
+        long_df &lt;- long_df %&gt;% filter(month &gt;= mstart, month &lt;= mend)
+      }
+
+      if (!is.null(input$filter_center) &amp;&amp; length(input$filter_center) &gt; 0) {
+        long_df &lt;- long_df %&gt;% filter(center %in% input$filter_center)
+      }
+
+      if (!is.null(input$filter_category) &amp;&amp; length(input$filter_category) &gt; 0) {
+        long_df &lt;- long_df %&gt;% filter(category %in% input$filter_category)
+      }
+
+      status_ids &lt;- rv$posts %&gt;% filter(application_status == target_status) %&gt;% pull(id)
+      long_df &lt;- long_df %&gt;% filter(id %in% status_ids)
+
+      if (!nrow(long_df)) {
+        return(tibble(month = as.Date(character()), center = character(), category = character(), value = numeric(), facet = character()))
+      }
+
+      agg_monthly &lt;- long_df %&gt;%
+        mutate(month = as.Date(paste0(format(month, "%Y-%m"), "-01"))) %&gt;%
+        group_by(month, center, category) %&gt;%
+        summarise(value = sum(value, na.rm = TRUE), .groups = "drop")
+      
+      all_months &lt;- unique(agg_monthly$month)
+      all_centers &lt;- unique(agg_monthly$center)
+      all_categories &lt;- unique(agg_monthly$category)
+      
+      complete_grid &lt;- expand_grid(month = all_months, center = all_centers, category = all_categories)
+      
+      agg_data &lt;- complete_grid %&gt;%
+        left_join(agg_monthly, by = c("month", "center", "category")) %&gt;%
+        replace_na(list(value = 0)) %&gt;%
+        arrange(center, category, month) %&gt;%
+        group_by(center, category) %&gt;%
+        mutate(value = cumsum(value)) %&gt;%
+        ungroup() %&gt;%
+        mutate(facet = center)
+
+      all_sites_data &lt;- complete_grid %&gt;%
+        left_join(agg_monthly, by = c("month", "center", "category")) %&gt;%
+        replace_na(list(value = 0)) %&gt;%
+        group_by(month, category) %&gt;%
+        summarise(value = sum(value, na.rm = TRUE), .groups = "drop") %&gt;%
+        arrange(category, month) %&gt;%
+        group_by(category) %&gt;%
+        mutate(value = cumsum(value)) %&gt;%
+        ungroup() %&gt;%
+        mutate(center = "ALL_SITES_TOTAL", facet = "All sites")
+
+      bind_rows(agg_data, all_sites_data) %&gt;%
+        mutate(facet = factor(facet, levels = c(sort(unique(agg_data$center)), "All sites")))
+    })
+  }
+
+  visualization_data_applied_for &lt;- create_status_filtered_viz("Applied for")
+  visualization_data_funded &lt;- create_status_filtered_viz("Funded")
+  visualization_data_applied_elsewhere &lt;- create_status_filtered_viz("Applied for elsewhere")
+  visualization_data_not_applied &lt;- create_status_filtered_viz("Not applied for")
+  
+  # All statuses combined (no status filter)
+  visualization_data_all &lt;- reactive({
     long_df &lt;- build_long_budget(rv$posts, input$budget_start, input$budget_end, salaries_lookup = make_salary_lookup(rv$salaries), inflation_pct = input$inflation_pct, salaries_tbl = rv$salaries)
     
-    if (!nrow(long_df)) {
-      return(tibble(
-        month = as.Date(character()),
-        center = character(),
-        category = character(),
-        value = numeric(),
-        facet = character()
-      ))
-    }
-
-    # Apply same filters as filtered_posts() to respect table viewer filtering
+    if (!nrow(long_df)) return(tibble(month = as.Date(character()), center = character(), category = character(), value = numeric(), facet = factor(character())))
+    
     if (!is.null(input$filter_month_range) &amp;&amp; all(!is.na(input$filter_month_range))) {
       mstart &lt;- as.Date(input$filter_month_range[1])
       mend &lt;- as.Date(input$filter_month_range[2])
       long_df &lt;- long_df %&gt;% filter(month &gt;= mstart, month &lt;= mend)
     }
-
     if (!is.null(input$filter_center) &amp;&amp; length(input$filter_center) &gt; 0) {
       long_df &lt;- long_df %&gt;% filter(center %in% input$filter_center)
     }
-
     if (!is.null(input$filter_category) &amp;&amp; length(input$filter_category) &gt; 0) {
       long_df &lt;- long_df %&gt;% filter(category %in% input$filter_category)
     }
-
-    if (!is.null(input$filter_status) &amp;&amp; length(input$filter_status) &gt; 0) {
-      status_ids &lt;- rv$posts %&gt;% filter(application_status %in% input$filter_status) %&gt;% pull(id)
-      long_df &lt;- long_df %&gt;% filter(id %in% status_ids)
-    }
-
-    if (!nrow(long_df)) {
-      return(tibble(
-        month = as.Date(character()),
-        center = character(),
-        category = character(),
-        value = numeric(),
-        facet = character()
-      ))
-    }
-
-    # Aggregate by month, site (center), and category (monthly values)
+    
+    if (!nrow(long_df)) return(tibble(month = as.Date(character()), center = character(), category = character(), value = numeric(), facet = factor(character())))
+    
+    # Aggregate by month, center, category (no status filter)
     agg_monthly &lt;- long_df %&gt;%
-      mutate(month = as.Date(paste0(format(month, "%Y-%m"), "-01"))) %&gt;%
       group_by(month, center, category) %&gt;%
       summarise(value = sum(value, na.rm = TRUE), .groups = "drop")
     
-    # Ensure all month-site-category combinations exist (fill missing with 0)
     all_months &lt;- unique(agg_monthly$month)
     all_centers &lt;- unique(agg_monthly$center)
     all_categories &lt;- unique(agg_monthly$category)
     
-    complete_grid &lt;- expand_grid(
-      month = all_months,
-      center = all_centers,
-      category = all_categories
-    )
+    complete_grid &lt;- expand_grid(month = all_months, center = all_centers, category = all_categories)
     
     agg_data &lt;- complete_grid %&gt;%
       left_join(agg_monthly, by = c("month", "center", "category")) %&gt;%
       replace_na(list(value = 0)) %&gt;%
       arrange(center, category, month) %&gt;%
       group_by(center, category) %&gt;%
-      mutate(value = cumsum(value)) %&gt;%
+      mutate(cumsum_value = cumsum(value)) %&gt;%
       ungroup() %&gt;%
-      mutate(facet = center)
-
-    # Create "All sites" aggregate: sum monthly values across sites, then cumulative sum once.
-    all_sites_data &lt;- complete_grid %&gt;%
-      left_join(agg_monthly, by = c("month", "center", "category")) %&gt;%
-      replace_na(list(value = 0)) %&gt;%
+      mutate(facet = center, value = cumsum_value) %&gt;%
+      select(month, center, category, value, facet)
+    
+    # Add "All sites" row (computed from raw agg_monthly, ensuring complete grid)
+    agg_all_sites_monthly &lt;- agg_monthly %&gt;%
       group_by(month, category) %&gt;%
-      summarise(value = sum(value, na.rm = TRUE), .groups = "drop") %&gt;%
+      summarise(value = sum(value, na.rm = TRUE), .groups = "drop")
+    
+    all_sites_complete_grid &lt;- expand_grid(month = all_months, category = all_categories)
+    
+    all_sites_raw &lt;- all_sites_complete_grid %&gt;%
+      left_join(agg_all_sites_monthly, by = c("month", "category")) %&gt;%
+      replace_na(list(value = 0)) %&gt;%
       arrange(category, month) %&gt;%
       group_by(category) %&gt;%
       mutate(value = cumsum(value)) %&gt;%
       ungroup() %&gt;%
-      mutate(center = "ALL_SITES_TOTAL", facet = "All sites")
-
-    # Combine both
-    bind_rows(agg_data, all_sites_data) %&gt;%
+      mutate(center = "All sites", facet = "All sites")
+    
+    result &lt;- bind_rows(agg_data, all_sites_raw) %&gt;%
       mutate(facet = factor(facet, levels = c(sort(unique(agg_data$center)), "All sites")))
+    
+    result
   })
 
-  output$visualization_plot &lt;- renderPlotly({
-    viz_data &lt;- visualization_data()
+  # Analytics data reactives
+  analytics_funding_by_status &lt;- reactive({
+    posts_with_status &lt;- rv$posts %&gt;% filter(value_mode != "sum") %&gt;% select(id, center, application_status)
+    long_df &lt;- build_long_budget(rv$posts, input$budget_start, input$budget_end, salaries_lookup = make_salary_lookup(rv$salaries), inflation_pct = input$inflation_pct, salaries_tbl = rv$salaries)
     
+    if (!nrow(long_df)) return(tibble(center = character(), status = character(), total_value = numeric()))
+    
+    if (!is.null(input$filter_month_range) &amp;&amp; all(!is.na(input$filter_month_range))) {
+      mstart &lt;- as.Date(input$filter_month_range[1])
+      mend &lt;- as.Date(input$filter_month_range[2])
+      long_df &lt;- long_df %&gt;% filter(month &gt;= mstart, month &lt;= mend)
+    }
+    if (!is.null(input$filter_center) &amp;&amp; length(input$filter_center) &gt; 0) {
+      long_df &lt;- long_df %&gt;% filter(center %in% input$filter_center)
+    }
+    if (!is.null(input$filter_category) &amp;&amp; length(input$filter_category) &gt; 0) {
+      long_df &lt;- long_df %&gt;% filter(category %in% input$filter_category)
+    }
+    
+    long_df %&gt;%
+      left_join(posts_with_status %&gt;% select(id, application_status), by = "id") %&gt;%
+      group_by(center, application_status) %&gt;%
+      summarise(total_value = sum(value, na.rm = TRUE), .groups = "drop") %&gt;%
+      replace_na(list(application_status = "Unknown")) %&gt;%
+      arrange(center, application_status)
+  })
+
+  analytics_budget_by_site &lt;- reactive({
+    long_df &lt;- build_long_budget(rv$posts, input$budget_start, input$budget_end, salaries_lookup = make_salary_lookup(rv$salaries), inflation_pct = input$inflation_pct, salaries_tbl = rv$salaries)
+    
+    if (!nrow(long_df)) return(tibble(center = character(), total_value = numeric()))
+    
+    if (!is.null(input$filter_month_range) &amp;&amp; all(!is.na(input$filter_month_range))) {
+      mstart &lt;- as.Date(input$filter_month_range[1])
+      mend &lt;- as.Date(input$filter_month_range[2])
+      long_df &lt;- long_df %&gt;% filter(month &gt;= mstart, month &lt;= mend)
+    }
+    if (!is.null(input$filter_center) &amp;&amp; length(input$filter_center) &gt; 0) {
+      long_df &lt;- long_df %&gt;% filter(center %in% input$filter_center)
+    }
+    if (!is.null(input$filter_category) &amp;&amp; length(input$filter_category) &gt; 0) {
+      long_df &lt;- long_df %&gt;% filter(category %in% input$filter_category)
+    }
+    
+    long_df %&gt;%
+      group_by(center) %&gt;%
+      summarise(total_value = sum(value, na.rm = TRUE), .groups = "drop") %&gt;%
+      arrange(desc(total_value))
+  })
+
+  analytics_budget_by_category &lt;- reactive({
+    long_df &lt;- build_long_budget(rv$posts, input$budget_start, input$budget_end, salaries_lookup = make_salary_lookup(rv$salaries), inflation_pct = input$inflation_pct, salaries_tbl = rv$salaries)
+    
+    if (!nrow(long_df)) return(tibble(category = character(), total_value = numeric()))
+    
+    if (!is.null(input$filter_month_range) &amp;&amp; all(!is.na(input$filter_month_range))) {
+      mstart &lt;- as.Date(input$filter_month_range[1])
+      mend &lt;- as.Date(input$filter_month_range[2])
+      long_df &lt;- long_df %&gt;% filter(month &gt;= mstart, month &lt;= mend)
+    }
+    if (!is.null(input$filter_center) &amp;&amp; length(input$filter_center) &gt; 0) {
+      long_df &lt;- long_df %&gt;% filter(center %in% input$filter_center)
+    }
+    if (!is.null(input$filter_category) &amp;&amp; length(input$filter_category) &gt; 0) {
+      long_df &lt;- long_df %&gt;% filter(category %in% input$filter_category)
+    }
+    
+    long_df %&gt;%
+      group_by(category) %&gt;%
+      summarise(total_value = sum(value, na.rm = TRUE), .groups = "drop") %&gt;%
+      arrange(desc(total_value))
+  })
+
+  analytics_metrics &lt;- reactive({
+    long_df &lt;- build_long_budget(rv$posts, input$budget_start, input$budget_end, salaries_lookup = make_salary_lookup(rv$salaries), inflation_pct = input$inflation_pct, salaries_tbl = rv$salaries)
+    
+    if (!nrow(long_df)) return(tibble(metric = character(), value = numeric()))
+    
+    if (!is.null(input$filter_month_range) &amp;&amp; all(!is.na(input$filter_month_range))) {
+      mstart &lt;- as.Date(input$filter_month_range[1])
+      mend &lt;- as.Date(input$filter_month_range[2])
+      long_df &lt;- long_df %&gt;% filter(month &gt;= mstart, month &lt;= mend)
+    }
+    if (!is.null(input$filter_center) &amp;&amp; length(input$filter_center) &gt; 0) {
+      long_df &lt;- long_df %&gt;% filter(center %in% input$filter_center)
+    }
+    if (!is.null(input$filter_category) &amp;&amp; length(input$filter_category) &gt; 0) {
+      long_df &lt;- long_df %&gt;% filter(category %in% input$filter_category)
+    }
+    
+    posts_with_status &lt;- rv$posts %&gt;% filter(value_mode != "sum") %&gt;% select(id, application_status)
+    data_with_status &lt;- long_df %&gt;%
+      left_join(posts_with_status %&gt;% select(id, application_status), by = "id") %&gt;%
+      replace_na(list(application_status = "Unknown"))
+    
+    total_budget &lt;- sum(data_with_status$value, na.rm = TRUE)
+    applied_for &lt;- sum(data_with_status$value[data_with_status$application_status == "Applied for"], na.rm = TRUE)
+    funded &lt;- sum(data_with_status$value[data_with_status$application_status == "Funded"], na.rm = TRUE)
+    applied_elsewhere &lt;- sum(data_with_status$value[data_with_status$application_status == "Applied for elsewhere"], na.rm = TRUE)
+    not_applied &lt;- sum(data_with_status$value[data_with_status$application_status == "Not applied for"], na.rm = TRUE)
+    
+    tibble(
+      metric = c("Total Budget", "Applied for", "Funded", "Applied Elsewhere", "Not Applied", "Funding Gap"),
+      value = c(total_budget, applied_for, funded, applied_elsewhere, not_applied, applied_for - funded)
+    )
+  })
+
+  # Helper function to create cumulative line chart for a given visualization_data reactive
+  create_cumulative_line_chart &lt;- function(viz_data) {
     if (!nrow(viz_data)) {
       p &lt;- ggplot() +
         geom_blank() +
-        labs(title = "No data to display. Add posts to view budget visualization.") +
+        labs(title = "No data to display.") +
         theme_minimal()
       return(ggplotly(p, tooltip = "none"))
     }
 
-    # Color palette for categories - using RColorBrewer Set2
-    # Order categories by their total cumulative sum (largest at bottom)
-    # Use the "All sites" facet to get true totals, or sum across sites if it doesn't exist
     all_sites_data &lt;- viz_data %&gt;% filter(facet == "All sites")
     if (nrow(all_sites_data) &gt; 0) {
-      # Use all_sites aggregate - get final cumulative value for each category
       cat_totals &lt;- all_sites_data %&gt;%
         group_by(category) %&gt;%
         summarise(total_value = max(value, na.rm = TRUE), .groups = "drop") %&gt;%
         arrange(desc(total_value))
     } else {
-      # Fall back to summing across all data
       cat_totals &lt;- viz_data %&gt;%
         group_by(category) %&gt;%
         summarise(total_value = sum(value, na.rm = TRUE), .groups = "drop") %&gt;%
@@ -6064,7 +6426,6 @@ server &lt;- function(input, output, session) {
     }
     unique_cats &lt;- cat_totals$category
     n_cats &lt;- length(unique_cats)
-    # Set2 has colors: #66C2A5, #FC8D62, #8DA0CB, #E78AC3, #A6D854, #FFD92F, #E5C494, #B3B3B3
     set2_colors &lt;- c("#66C2A5", "#FC8D62", "#8DA0CB", "#E78AC3", "#A6D854", "#FFD92F", "#E5C494", "#B3B3B3")
     color_palette &lt;- if (n_cats &lt;= 8) {
       setNames(set2_colors[1:n_cats], unique_cats)
@@ -6074,7 +6435,6 @@ server &lt;- function(input, output, session) {
 
     facets &lt;- levels(viz_data$facet)
 
-    # Show each category in the legend exactly once, in the first facet where it appears with value &gt; 0.
     cat_legend_facet &lt;- setNames(rep(NA_character_, length(unique_cats)), unique_cats)
     for (cat_name in unique_cats) {
       for (f in facets) {
@@ -6089,8 +6449,6 @@ server &lt;- function(input, output, session) {
       }
     }
     
-    # Calculate max stacked total across non-"All sites" facets for aligned y-axes.
-    # Use per-month sums across categories (stack height), not max of individual categories.
     non_all_data &lt;- viz_data %&gt;% filter(facet != "All sites")
     y_max_non_all &lt;- if (nrow(non_all_data) &gt; 0) {
       non_all_data %&gt;%
@@ -6108,16 +6466,13 @@ server &lt;- function(input, output, session) {
         return(plot_ly() %&gt;% add_trace(y = numeric(), name = f))
       }
       
-      # Only include categories present in this facet, in the ordered sequence
       present_cats &lt;- unique_cats[unique_cats %in% facet_data$category]
-      
       p &lt;- plot_ly()
       for (cat_name in present_cats) {
         cat_data &lt;- facet_data %&gt;%
           filter(category == cat_name) %&gt;%
           arrange(month)
 
-        # Trim leading zero cumulative values so hover only lists categories that are present (&gt; 0).
         first_positive_idx &lt;- which(cat_data$value &gt; 0)[1]
         if (is.na(first_positive_idx)) next
         cat_data &lt;- cat_data[first_positive_idx:nrow(cat_data), , drop = FALSE]
@@ -6141,7 +6496,6 @@ server &lt;- function(input, output, session) {
           )
       }
       
-      # Set y-axis range: aligned for non-All sites, free for All sites
       y_axis_config &lt;- list(title = if (f == facets[1]) "Cumulative amount" else "")
       if (f != "All sites" &amp;&amp; y_max_non_all &gt; 0) {
         y_axis_config$range &lt;- c(0, y_max_non_all)
@@ -6149,9 +6503,7 @@ server &lt;- function(input, output, session) {
       
       x_start &lt;- format(as.Date(input$budget_start), "%Y-%m-%d")
       x_end   &lt;- format(as.Date(input$budget_end),   "%Y-%m-%d")
-      period_months &lt;- as.integer(
-        difftime(as.Date(input$budget_end), as.Date(input$budget_start), units = "days") / 30
-      )
+      period_months &lt;- as.integer(difftime(as.Date(input$budget_end), as.Date(input$budget_start), units = "days") / 30)
       dtick_val &lt;- if (period_months &lt;= 24) "M3" else if (period_months &lt;= 60) "M6" else "M12"
 
       p &lt;- p %&gt;%
@@ -6202,7 +6554,6 @@ server &lt;- function(input, output, session) {
       config(toImageButtonOptions = list(format = "png", filename = paste0("budget_visualization_", format(Sys.Date(), "%Y%m%d"))))
 
     base_layout &lt;- list(
-      title = list(text = "Cumulative budget over time by category and site", x = 0.5, xanchor = "center"),
       showlegend = TRUE,
       legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.25, yanchor = "top"),
       hovermode = "x unified",
@@ -6211,7 +6562,114 @@ server &lt;- function(input, output, session) {
     )
 
     do.call(layout, c(list(base_fig), base_layout, xaxis_domains))
+  }
+
+  # Status-specific visualization renderers
+  output$viz_applied_for &lt;- renderPlotly({
+    create_cumulative_line_chart(visualization_data_applied_for())
   })
+  outputOptions(output, "viz_applied_for", suspendWhenHidden = FALSE)
+
+  output$viz_funded &lt;- renderPlotly({
+    create_cumulative_line_chart(visualization_data_funded())
+  })
+  outputOptions(output, "viz_funded", suspendWhenHidden = FALSE)
+
+  output$viz_applied_elsewhere &lt;- renderPlotly({
+    create_cumulative_line_chart(visualization_data_applied_elsewhere())
+  })
+  outputOptions(output, "viz_applied_elsewhere", suspendWhenHidden = FALSE)
+
+  output$viz_not_applied &lt;- renderPlotly({
+    create_cumulative_line_chart(visualization_data_not_applied())
+  })
+  outputOptions(output, "viz_not_applied", suspendWhenHidden = FALSE)
+
+  output$viz_all &lt;- renderPlotly({
+    create_cumulative_line_chart(visualization_data_all())
+  })
+  outputOptions(output, "viz_all", suspendWhenHidden = FALSE)
+
+  # Analytics chart renderers
+  output$analytics_status_breakdown &lt;- renderPlotly({
+    data &lt;- analytics_funding_by_status()
+    if (!nrow(data)) {
+      p &lt;- ggplot() + geom_blank() + theme_minimal()
+      return(ggplotly(p, tooltip = "none"))
+    }
+
+    p &lt;- ggplot(data, aes(x = center, y = total_value, fill = application_status)) +
+      geom_col(position = "stack") +
+      labs(title = "Budget by Funding Status", x = "Site", y = "Total Budget", fill = "Status") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    
+    ggplotly(p, tooltip = c("x", "y", "fill"))
+  })
+  outputOptions(output, "analytics_status_breakdown", suspendWhenHidden = FALSE)
+
+  output$analytics_budget_by_site &lt;- renderPlotly({
+    data &lt;- analytics_budget_by_site()
+    if (!nrow(data)) {
+      p &lt;- ggplot() + geom_blank() + theme_minimal()
+      return(ggplotly(p, tooltip = "none"))
+    }
+
+    p &lt;- ggplot(data, aes(x = reorder(center, total_value), y = total_value, fill = center)) +
+      geom_col() +
+      coord_flip() +
+      labs(title = "Total Budget by Site", x = "Site", y = "Total Budget") +
+      theme_minimal() +
+      theme(legend.position = "none")
+    
+    ggplotly(p, tooltip = c("x", "y"))
+  })
+
+  output$analytics_budget_by_category &lt;- renderPlotly({
+    data &lt;- analytics_budget_by_category()
+    if (!nrow(data)) {
+      p &lt;- ggplot() + geom_blank() + theme_minimal()
+      return(ggplotly(p, tooltip = "none"))
+    }
+
+    p &lt;- ggplot(data, aes(x = reorder(category, total_value), y = total_value, fill = category)) +
+      geom_col() +
+      coord_flip() +
+      labs(title = "Total Budget by Category", x = "Category", y = "Total Budget") +
+      theme_minimal() +
+      theme(legend.position = "none")
+    
+    ggplotly(p, tooltip = c("x", "y"))
+  })
+  outputOptions(output, "analytics_budget_by_category", suspendWhenHidden = FALSE)
+
+  output$analytics_metrics &lt;- renderUI({
+    data &lt;- analytics_metrics()
+    
+    if (!nrow(data)) {
+      return(HTML("&lt;p&gt;No data to display.&lt;/p&gt;"))
+    }
+    
+    metrics_html &lt;- sapply(seq_len(nrow(data)), function(i) {
+      metric &lt;- data$metric[i]
+      value &lt;- data$value[i]
+      value_formatted &lt;- scales::dollar(value)
+      paste0(
+        '&lt;div style="padding: 10px; margin: 5px; border: 1px solid #ddd; border-radius: 5px; background: #f9f9f9;"&gt;',
+        '&lt;strong&gt;', metric, '&lt;/strong&gt;&lt;br&gt;',
+        value_formatted,
+        '&lt;/div&gt;'
+      )
+    }, USE.NAMES = FALSE)
+    
+    HTML(paste0(
+      '&lt;div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;"&gt;',
+      paste(metrics_html, collapse = ""),
+      '&lt;/div&gt;'
+    ))
+  })
+
+
 
   observeEvent(input$save_pdf_btn, {
     fname &lt;- paste0(workbook_name_effective(), "_budget_", format(Sys.Date(), "%Y%m%d"), ".pdf")
