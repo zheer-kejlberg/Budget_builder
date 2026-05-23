@@ -4921,7 +4921,12 @@ server <- function(input, output, session) {
         DTOutput("wide_form_table")
       )
     } else if (isTRUE(input$display_form == "summary")) {
-      DTOutput("summary_form_table")
+      tagList(
+        div(style = "padding: 4px 0 6px;",
+          checkboxInput("summary_show_fte", "Show FTE columns", value = FALSE)
+        ),
+        DTOutput("summary_form_table")
+      )
     } else {
       DTOutput("posts_table")
     }
@@ -4942,44 +4947,40 @@ server <- function(input, output, session) {
   # ---------------------------------------------------------------------------
   # build_summary_table_data
   # Returns a one-row-per-post table pivoted wide by period.
-  # Columns: Site, Post name, Category, Note,
-  #          [period amount cols], [FTE period cols],
-  #          " " (spacer), [status total cols]
-  # Followed by: per-site total rows, blank separator rows, grand total row.
+  # Columns (in order):
+  #   id (hidden – used for row→post mapping),
+  #   Post name, Category, Note (Note always hidden),
+  #   [period amount cols],
+  #   "  " (spacer),
+  #   [FTE period cols],
+  #   " " (spacer),
+  #   [status total cols]
+  # Structural rows (id = NA): site-header, site-total, blank separator, grand total.
   # ---------------------------------------------------------------------------
   build_summary_table_data <- function(period_choice, posts_data, budget_start, budget_end,
                                        salaries_data, inflation_pct) {
     status_order <- c("Applied for", "Applied for elsewhere", "Not applied for", "Funded")
 
-    if (!nrow(posts_data)) {
-      return(list(
-        data        = tibble(Site = character(), `Post name` = character(),
-                             Category = character(), Note = character()),
-        period_cols = character(),
-        fte_cols    = character(),
-        status_cols = character()
-      ))
-    }
+    empty_result <- function() list(
+      data        = tibble(id = integer(), `Post name` = character(),
+                           Category = character(), Note = character()),
+      period_cols = character(),
+      fte_cols    = character(),
+      status_cols = character()
+    )
+
+    if (!nrow(posts_data)) return(empty_result())
 
     long <- build_long_budget(
       posts_data, budget_start, budget_end,
       salaries_lookup = make_salary_lookup(salaries_data),
       inflation_pct = inflation_pct, salaries_tbl = salaries_data
     )
-    if (!nrow(long)) {
-      return(list(
-        data        = tibble(Site = character(), `Post name` = character(),
-                             Category = character(), Note = character()),
-        period_cols = character(),
-        fte_cols    = character(),
-        status_cols = character()
-      ))
-    }
+    if (!nrow(long)) return(empty_result())
 
     meta <- posts_data %>%
       select(id, start_date, end_date, note, needs_amendment, application_status)
 
-    # Build Period label, then aggregate monthly rows to (id, Period)
     combined <- long %>%
       left_join(meta, by = "id") %>%
       mutate(
@@ -4991,63 +4992,47 @@ server <- function(input, output, session) {
         application_status = if_else(is.na(application_status), "Applied for", application_status)
       )
 
-    # Per-post-period: sum amount, compute period-specific FTE
     post_period <- combined %>%
       group_by(id, Period) %>%
       summarise(
-        amount      = sum(value),
-        period_fte  = first(fte) * n() / 12,
+        amount     = sum(value),
+        period_fte = first(fte) * n() / 12,
         .groups = "drop"
       )
 
-    # Post-level metadata (constant across periods)
     post_meta <- posts_data %>%
       transmute(
         id,
-        Site     = center,
-        `Post name` = post_name,
-        Category = category,
-        Note     = note,
+        Site           = center,
+        `Post name`    = post_name,
+        Category       = category,
+        Note           = note,
         application_status = if_else(is.na(application_status), "Applied for", application_status)
       )
 
-    # Determine ordered period names
     all_periods <- sort(unique(post_period$Period))
-
-    # Pivot amounts wide
-    amounts_wide <- post_period %>%
-      select(id, Period, amount) %>%
-      tidyr::pivot_wider(names_from = Period, values_from = amount,
-                         values_fill = NA_real_)
-
-    # Pivot FTE wide (rename cols to "FTE <period>")
-    fte_wide <- post_period %>%
-      select(id, Period, period_fte) %>%
-      tidyr::pivot_wider(names_from = Period, values_from = period_fte,
-                         values_fill = NA_real_) %>%
-      rename_with(~ paste0("FTE ", .), .cols = -id)
-
     period_cols <- all_periods
     fte_cols    <- paste0("FTE ", all_periods)
 
-    # Join everything together
+    amounts_wide <- post_period %>%
+      select(id, Period, amount) %>%
+      tidyr::pivot_wider(names_from = Period, values_from = amount, values_fill = NA_real_)
+
+    fte_wide <- post_period %>%
+      select(id, Period, period_fte) %>%
+      tidyr::pivot_wider(names_from = Period, values_from = period_fte, values_fill = NA_real_) %>%
+      rename_with(~ paste0("FTE ", .), .cols = -id)
+
     df <- post_meta %>%
       left_join(amounts_wide, by = "id") %>%
       left_join(fte_wide,     by = "id")
 
-    # Ensure all expected period/FTE cols present (in case a post spans only part)
     for (col in period_cols) if (!col %in% names(df)) df[[col]] <- NA_real_
     for (col in fte_cols)    if (!col %in% names(df)) df[[col]] <- NA_real_
 
-    # Add spacer column
-    df[[" "]] <- NA_character_
-
-    # Determine which statuses are present
-    statuses_present <- intersect(status_order,
-                                  unique(post_meta$application_status))
+    statuses_present <- intersect(status_order, unique(post_meta$application_status))
     status_cols <- statuses_present
 
-    # Per-post status amount totals (sum across all periods for that post)
     post_status_totals <- post_period %>%
       left_join(post_meta %>% select(id, application_status), by = "id") %>%
       group_by(id, application_status) %>%
@@ -5057,65 +5042,89 @@ server <- function(input, output, session) {
       st_totals <- post_status_totals %>%
         filter(application_status == st) %>%
         select(id, total)
-      df <- df %>%
-        left_join(st_totals %>% rename(!!st := total), by = "id")
+      df <- df %>% left_join(st_totals %>% rename(!!st := total), by = "id")
     }
 
-    # Drop id and application_status helper cols; reorder
+    # Final column order: id, Post name, Category, Note, [periods], "  ", [FTE cols], " ", [status cols]
+    # Site column dropped – replaced by site-header rows
     df <- df %>%
-      select(-id, -application_status,
-             Site, `Post name`, Category, Note,
-             all_of(period_cols), all_of(fte_cols),
-             " ", all_of(status_cols))
+      select(id, `Post name`, Category, Note,
+             all_of(period_cols),
+             all_of(fte_cols),
+             all_of(status_cols),
+             Site, application_status)   # keep Site + status temporarily for grouping
 
-    # Build numeric cols vector (all period + fte + status cols)
     num_cols <- c(period_cols, fte_cols, status_cols)
 
-    # ----- build structured rows: posts + site totals + separators + grand total -----
-    sites_vec <- unique(df$Site)
+    sites_vec   <- unique(df$Site)
+    rows_list   <- list()
+    site_totals <- list()
 
-    rows_list    <- list()
-    site_totals  <- list()  # collect site-total rows for grand-total summing
+    # Helper: build an NA structural row with same schema (id=NA)
+    make_na_row <- function(df_template) {
+      r <- df_template[0L, ][1L, ]
+      r[1L, ] <- NA
+      r$id <- NA_integer_
+      r
+    }
 
     for (site in sites_vec) {
       site_posts <- df %>% filter(Site == site)
+
+      # Site header row (bold label, all numeric NA)
+      hdr_row <- make_na_row(df)
+      hdr_row$`Post name` <- site          # site name in Post name column
+      rows_list <- c(rows_list, list(hdr_row))
+
       rows_list <- c(rows_list, list(site_posts))
 
-      # Site total row: sum all numeric cols across site's posts
+      # Site total row
       st_row <- site_posts %>%
         summarise(across(all_of(num_cols), ~ sum(.x, na.rm = TRUE)))
       st_row <- bind_cols(
-        tibble(Site = site, `Post name` = "Site total",
+        tibble(id = NA_integer_, `Post name` = "Site total",
                Category = NA_character_, Note = NA_character_),
         st_row,
-        tibble(" " = NA_character_)
+        tibble(Site = site, application_status = NA_character_)
       )
-      # Reorder to match df column order
       st_row <- st_row[, names(df), drop = FALSE]
       rows_list   <- c(rows_list, list(st_row))
       site_totals <- c(site_totals, list(st_row))
 
       # Blank separator
-      blank_row <- df[0, ][1, ]  # one NA row with same schema
-      blank_row[1, ] <- NA
-      blank_row$Site <- NA_character_
-      rows_list <- c(rows_list, list(blank_row))
+      rows_list <- c(rows_list, list(make_na_row(df)))
     }
 
-    # Grand total row: sum of site-total rows only
+    # Grand total
     site_totals_df <- bind_rows(site_totals)
     grand_row <- site_totals_df %>%
       summarise(across(all_of(num_cols), ~ sum(.x, na.rm = TRUE)))
     grand_row <- bind_cols(
-      tibble(Site = NA_character_, `Post name` = "Grand total",
+      tibble(id = NA_integer_, `Post name` = "Grand total",
              Category = NA_character_, Note = NA_character_),
       grand_row,
-      tibble(" " = NA_character_)
+      tibble(Site = NA_character_, application_status = NA_character_)
     )
     grand_row <- grand_row[, names(df), drop = FALSE]
     rows_list <- c(rows_list, list(grand_row))
 
     result <- bind_rows(rows_list)
+
+    # Now drop Site and application_status; insert spacer columns at right places
+    spacer1 <- "  "   # between period cols and FTE cols
+    spacer2 <- " "    # between FTE cols and status cols
+    result <- result %>%
+      select(-Site, -application_status) %>%
+      mutate(!!spacer1 := NA_character_, !!spacer2 := NA_character_)
+
+    # Reorder: id, Post name, Category, Note, periods, spacer1, FTE, spacer2, status
+    result <- result %>%
+      select(id, `Post name`, Category, Note,
+             all_of(period_cols),
+             !!spacer1,
+             all_of(fte_cols),
+             !!spacer2,
+             all_of(status_cols))
 
     list(
       data        = result,
@@ -5594,6 +5603,7 @@ server <- function(input, output, session) {
 
   output$summary_form_table <- renderDT({
     req(input$display_form == "summary")
+    show_fte <- isTRUE(input$summary_show_fte)
 
     summ <- build_summary_table_data(
       input$period_format, rv$posts,
@@ -5613,54 +5623,115 @@ server <- function(input, output, session) {
       ))
     }
 
-    amount_cols <- c(period_cols, status_cols)
-    round_cols  <- c(period_cols, fte_cols, status_cols)
+    col_names   <- names(df)
+    # 0-based column indices
+    idx_id       <- 0L
+    idx_postname <- 1L
+    idx_category <- 2L
+    idx_note     <- 3L
+    idx_fte_cols <- which(col_names %in% fte_cols) - 1L
+    idx_spacer1  <- which(col_names == "  ") - 1L   # between periods and FTE
+    idx_spacer2  <- which(col_names == " ")  - 1L   # between FTE and status
 
-    # Row-type sentinels (used in rowCallback)
+    # Always hidden: id (0), Note (3)
+    always_hidden <- c(idx_id, idx_note)
+    # Conditionally hidden: spacer1, FTE cols (hidden when FTE checkbox off)
+    fte_hidden <- if (!show_fte) c(idx_spacer1, idx_fte_cols) else integer(0)
+
+    hidden_cols <- unique(c(always_hidden, fte_hidden))
+
+    col_defs <- list(
+      list(targets = as.list(hidden_cols), visible = FALSE),
+      # Spacer cols: no header, not sortable, narrow
+      list(targets = as.list(c(idx_spacer1, idx_spacer2)), orderable = FALSE, title = ""),
+      # Status cols: bold
+      list(targets = as.list(which(col_names %in% status_cols) - 1L),
+           className = "dt-summary-status")
+    )
+
     dt <- datatable(
       df,
       rownames  = FALSE,
-      selection = "none",
+      selection = "single",
       options = list(
-        pageLength = 100,
-        lengthMenu = list(c(50, 100, -1), c("50", "100", "All")),
-        searching  = FALSE,
-        ordering   = FALSE,
-        scrollX    = TRUE,
-        dom        = "t",
+        pageLength  = 200,
+        searching   = FALSE,
+        ordering    = FALSE,
+        scrollX     = TRUE,
+        dom         = "t",
+        columnDefs  = col_defs,
         rowCallback = JS(
-          "function(row, data) {",
-          "  var site  = typeof data[0] === 'string' ? data[0] : '';",
+          "function(row, data, index) {",
+          "  var id    = data[0];",   # hidden id col
           "  var pname = typeof data[1] === 'string' ? data[1] : '';",
-          "  if (pname === 'Site total') {",
-          "    $(row).css({'font-weight':'700', 'background-color':'#f1f1f1'});",
-          "  } else if (pname === 'Grand total') {",
-          "    $(row).css({'font-weight':'700', 'background-color':'#e4e4e4'});",
-          "  } else if (site === '' || site === null || (typeof site === 'object' && site === null)) {",
-          "    $(row).css({'background-color':'#ffffff', 'line-height':'8px'});",
+          "  var isStructural = (id === null || id === '' || id === 'NA' ||",
+          "                      id === null || typeof id !== 'number');",
+          "  if (pname === 'Grand total') {",
+          "    $(row).css({'font-weight':'700','background-color':'#e4e4e4'});",
+          "    $(row).addClass('summary-structural');",
+          "  } else if (pname === 'Site total') {",
+          "    $(row).css({'font-weight':'700','background-color':'#f1f1f1'});",
+          "    $(row).addClass('summary-structural');",
+          "  } else if (isStructural && pname !== '' && pname !== null) {",
+          "    // Site header row",
+          "    $(row).css({'font-weight':'700','background-color':'#f8f8f8'});",
+          "    $(row).addClass('summary-structural');",
+          "  } else if (isStructural) {",
+          "    // Blank separator",
+          "    $(row).css({'line-height':'8px'});",
           "    $('td', row).text('');",
+          "    $(row).addClass('summary-structural');",
           "  }",
+          "}"
+        ),
+        # Prevent structural rows from being selected
+        drawCallback = JS(
+          "function() {",
+          "  var api = this.api();",
+          "  api.rows('.summary-structural').nodes().to$().css('cursor','default');",
           "}"
         )
       )
     )
 
-    if (length(round_cols) > 0) {
-      round_cols_present <- intersect(round_cols, names(df))
-      if (length(round_cols_present) > 0)
-        dt <- dt %>% formatRound(columns = round_cols_present, digits = 2, interval = 3, mark = ",")
-    }
+    round_cols_present <- intersect(c(period_cols, fte_cols, status_cols), col_names)
+    if (length(round_cols_present) > 0)
+      dt <- dt %>% formatRound(columns = round_cols_present, digits = 2, interval = 3, mark = ",")
 
-    if (length(status_cols) > 0) {
-      status_cols_present <- intersect(status_cols, names(df))
-      if (length(status_cols_present) > 0)
-        dt <- dt %>% formatStyle(columns = status_cols_present, fontWeight = "bold")
-    }
+    # Remove selection highlight from structural rows via CSS class override
+    dt <- dt %>% htmlwidgets::onRender(
+      "function(el, x) {
+        var api = $(el).find('table').DataTable();
+        $(el).on('click', 'tr', function() {
+          var row = api.row(this);
+          if ($(this).hasClass('summary-structural')) {
+            row.deselect();
+          }
+        });
+      }"
+    )
 
     dt
   }, server = FALSE)
 
   selected_post_id <- reactive({
+    if (identical(input$display_form, "summary")) {
+      sel <- input$summary_form_table_rows_selected
+      if (!length(sel)) return(NA_integer_)
+      # Re-build the summary data to get the id column
+      summ <- build_summary_table_data(
+        input$period_format, rv$posts,
+        input$budget_start, input$budget_end,
+        rv$salaries, input$inflation_pct
+      )
+      if (!nrow(summ$data)) return(NA_integer_)
+      row_idx <- as.integer(sel[[1]])
+      if (row_idx < 1 || row_idx > nrow(summ$data)) return(NA_integer_)
+      post_id <- summ$data$id[row_idx]
+      if (is.null(post_id) || is.na(post_id)) return(NA_integer_)
+      return(as.integer(post_id))
+    }
+
     if (identical(input$display_form, "wide")) {
       col_guard <- input$wide_col_selected
       if (is.null(col_guard) || is.na(col_guard) || as.integer(col_guard) < 1L) return(NA_integer_)
@@ -5776,6 +5847,8 @@ server <- function(input, output, session) {
             rv$form_error_text <- "Select a specific post column in Wide view to edit. Site/grand total columns are not editable."
           }
         }, delay = 0)
+      } else if (identical(input$display_form, "summary")) {
+        rv$form_error_text <- "Select a post row in Summary view to edit. Site header, total, and separator rows are not editable."
       }
       return()
     }
@@ -5919,6 +5992,8 @@ server <- function(input, output, session) {
             rv$form_error_text <- "Select a specific post column in Wide view to delete. Site/grand total columns are not deletable."
           }
         }, delay = 0)
+      } else if (identical(input$display_form, "summary")) {
+        rv$form_error_text <- "Select a post row in Summary view to delete. Site header, total, and separator rows cannot be deleted."
       }
       return()
     }
@@ -5942,6 +6017,8 @@ server <- function(input, output, session) {
             rv$form_error_text <- "Select a specific post column in Wide view to make inactive. Site/grand total columns are not selectable."
           }
         }, delay = 0)
+      } else if (identical(input$display_form, "summary")) {
+        rv$form_error_text <- "Select a post row in Summary view to make inactive. Site header, total, and separator rows are not selectable."
       }
       return()
     }
@@ -7121,7 +7198,7 @@ server <- function(input, output, session) {
                                                     salaries_data, inflation_pct) {
     summ   <- build_summary_table_data(period_choice, posts_data, budget_start, budget_end,
                                        salaries_data, inflation_pct)
-    result <- summ$data
+    result <- summ$data %>% select(-id)   # id is only for interactive DT row selection
     attr(result, "summary_status_cols") <- summ$status_cols
     attr(result, "summary_period_cols") <- summ$period_cols
     attr(result, "summary_fte_cols")    <- summ$fte_cols
