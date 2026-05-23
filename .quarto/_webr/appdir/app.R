@@ -1753,16 +1753,40 @@ ui <- fluidPage(
           colNames = rows.length > 0 ? Object.keys(rows[0]) : [];
         }
 
+        // Auto-fit column widths by scanning all cell values
+        var effectiveCols = columns.length > 0 ? columns : colNames;
+        var wchArr = effectiveCols.map(function(name) { return String(name).length; });
+        rows.forEach(function(row) {
+          effectiveCols.forEach(function(_, idx) {
+            var val = Array.isArray(row) ? row[idx] : null;
+            var len = (val != null) ? String(val).length : 0;
+            if (len > wchArr[idx]) wchArr[idx] = len;
+          });
+        });
+
+        // Extract colMeta early so we can use isFteCol for column width capping
+        var colMetaEarly = (meta.colMeta || {});
+        ws['!cols'] = wchArr.map(function(w, idx) {
+          var colHeader = String(effectiveCols[idx] || '');
+          var isNote = colHeader === 'Note' || colHeader === 'Notes';
+          var isFte  = !!(colMetaEarly[String(idx)] && colMetaEarly[String(idx)].isFteCol);
+          var maxW = isNote ? 10 : (isFte ? 8 : 35);
+          return { wch: Math.min(Math.max(w, 3), maxW) };
+        });
+
         if (rows.length > 0) {
           var range = XLSX.utils.decode_range(ws['!ref']);
-          var colMeta = (meta.colMeta || {});
+          var colMeta = colMetaEarly;
           var rowMeta = (meta.rowMeta || []);
+          var is_summary = sheetName.indexOf('summary') === 0;
 
           for (var R = range.s.r; R <= range.e.r; R++) {
             var isHeader = (R === range.s.r);
             var dataRowIdx = R - 1;  // row index in rowMeta (data rows start at index 0)
             var rowMetaEntry = (dataRowIdx >= 0 && dataRowIdx < rowMeta.length) ? rowMeta[dataRowIdx] : null;
-            var isRowTotal = rowMetaEntry && rowMetaEntry.isTotalRow;
+            var isRowTotal    = rowMetaEntry && rowMetaEntry.isTotalRow;
+            var isSiteHeader  = rowMetaEntry && rowMetaEntry.isSiteHeader;
+            var isBlankRow    = rowMetaEntry && rowMetaEntry.isBlankRow;
 
             for (var C = range.s.c; C <= range.e.c; C++) {
               var addr = XLSX.utils.encode_cell({r: R, c: C});
@@ -1770,32 +1794,56 @@ ui <- fluidPage(
 
               var colIdxStr = String(C);
               var colMetaEntry = colMeta[colIdxStr] || {};
-              var isNonAppliedFor = colMetaEntry.isNonAppliedFor;
+              var isNonAppliedForCol = colMetaEntry.isNonAppliedFor;  // column-level (wide form)
+              var isNonAppliedForRow = rowMetaEntry && rowMetaEntry.isNonAppliedFor; // row-level (summary)
+              var isFteCol = !!colMetaEntry.isFteCol;
               var colName = columns.length > C ? columns[C] : '';
               var isTotalCol = colMetaEntry.isTotalCol ||
                 colName === 'All sites > Total' || /> Site total$/.test(colName);
               
               var style = {};
               
-              // Apply italic for non-Applied for posts (all rows including header)
-              if (isNonAppliedFor) {
+              // Apply italic + grey for non-Applied for (column-level for wide, row-level for summary)
+              if (isNonAppliedForCol || isNonAppliedForRow) {
                 if (!style.font) style.font = {};
                 style.font.italic = true;
+                if (isNonAppliedForRow) {
+                  style.font.color = { rgb: 'FF888888' };
+                }
               }
 
-              // Apply bold for site total and grand total columns
+              // Apply bold for site total / grand total columns
               if (isTotalCol) {
                 if (!style.font) style.font = {};
                 style.font.bold = true;
               }
               
-              // Apply grey background for total rows
+              // Site header row: bold + grey fill + top border
+              if (isSiteHeader) {
+                if (!style.font) style.font = {};
+                style.font.bold = true;
+                style.fill = { fgColor: { rgb: 'FFE8E8E8' } };
+                style.border = { top: { style: 'medium', color: { rgb: 'FF888888' } } };
+              }
+
+              // Total rows (site total + grand total): darker grey + top+bottom border
               if (isRowTotal) {
-                style.fill = { fgColor: { rgb: 'FFC0C0C0' } };
+                style.fill = { fgColor: { rgb: 'FFC8C8C8' } };
                 style.border = {
                   top:    { style: 'thin', color: { rgb: 'FF000000' } },
                   bottom: { style: 'thin', color: { rgb: 'FF000000' } }
                 };
+              }
+
+              // Post name column (C === 0 in summary mode): grey bg for all non-spacer rows
+              if (!isHeader && !isRowTotal && !isSiteHeader && !isBlankRow && C === 0 && is_summary) {
+                style.fill = { fgColor: { rgb: 'FFE8E8E8' } };
+              }
+
+              // Number formats: FTE cols → 4 decimals; other numeric cells → DKK accounting
+              var isSpacerCol = /^\\s*$/.test(colName);
+              if (!isHeader && !isSpacerCol && typeof ws[addr].v === 'number') {
+                style.numFmt = isFteCol ? '0.0000' : '#,##0.00 \"kr.\"';
               }
               
               // Only set style if there's something to apply
@@ -1837,8 +1885,9 @@ ui <- fluidPage(
     Shiny.addCustomMessageHandler('save-pdf', function(payload) {
       if (typeof window.jspdf === 'undefined') { console.error('jsPDF not loaded'); return; }
 
-      var dtWrapper = document.querySelector('#wide_form_table .dataTables_wrapper');
-      if (!dtWrapper) { console.warn('DataTable not found'); return; }
+      var tableSelector = (payload.tableId || '#summary_form_table');
+      var dtWrapper = document.querySelector(tableSelector + ' .dataTables_wrapper');
+      if (!dtWrapper) { console.warn('DataTable not found for: ' + tableSelector); return; }
 
       var headTable = dtWrapper.querySelector('.dataTables_scrollHead table.dataTable');
       var bodyTable = dtWrapper.querySelector('.dataTables_scrollBody table.dataTable');
@@ -2040,51 +2089,27 @@ ui <- fluidPage(
       var vizW = 1200;
       var vizH = 700;
 
-      // Helper to capture plot SVG
+      // Helper to capture a plotly plot as PNG data URL.
+      // Uses html2canvas which renders the full DOM element including all
+      // stacked SVG layers (chart, annotations, facet/subplot titles).
       function capturePlot(elementId) {
         return new Promise(function(resolve) {
           try {
             var container = document.getElementById(elementId);
-            if (!container) {
-              console.warn('Container ' + elementId + ' not found');
-              return resolve(null);
-            }
-            
-            var plotElement = container.querySelector('.plotly');
-            if (!plotElement) {
-              console.warn('Plotly element not found in ' + elementId);
-              return resolve(null);
-            }
-            
-            var svg = plotElement.querySelector('svg');
-            if (!svg) {
-              console.warn('SVG not found in ' + elementId);
-              return resolve(null);
-            }
-            
-            var svgWidth = parseFloat(svg.getAttribute('width')) || 1200;
-            var svgHeight = parseFloat(svg.getAttribute('height')) || 700;
-            var aspectRatio = svgHeight / svgWidth;
-            
-            var canvas = document.createElement('canvas');
-            canvas.width = 1200;
-            canvas.height = Math.round(1200 * aspectRatio);
-            var ctx = canvas.getContext('2d');
-            
-            var svgString = new XMLSerializer().serializeToString(svg);
-            var img = new Image();
-            
-            img.onload = function() {
-              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            if (!container) { console.warn('Container ' + elementId + ' not found'); return resolve(null); }
+            if (typeof html2canvas !== 'function') { console.warn('html2canvas not available'); return resolve(null); }
+            html2canvas(container, {
+              backgroundColor: '#ffffff',
+              scale: 1,
+              logging: false,
+              useCORS: true,
+              allowTaint: true
+            }).then(function(canvas) {
               resolve(canvas.toDataURL('image/png'));
-            };
-            
-            img.onerror = function() {
-              console.warn('SVG rendering failed for ' + elementId);
+            }).catch(function(err) {
+              console.warn('html2canvas failed for ' + elementId + ':', err);
               resolve(null);
-            };
-            
-            img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgString)));
+            });
           } catch(e) {
             console.error('Exception in capturePlot for ' + elementId + ':', e);
             resolve(null);
@@ -2100,14 +2125,8 @@ ui <- fluidPage(
         var tblImg = tblCanvas.toDataURL('image/png');
         
         Promise.all([
-          Promise.resolve(tblImg),       // images[0]: Budget table
-          capturePlot('viz_applied_for'),    // images[1]: Applied for
-          capturePlot('viz_funded'),         // images[2]: Funded
-          capturePlot('viz_applied_elsewhere'), // images[3]: Applied elsewhere
-          capturePlot('viz_not_applied'),    // images[4]: Not applied
-          capturePlot('viz_all'),            // images[5]: All statuses
-          capturePlot('analytics_status_breakdown'), // images[6]: Status breakdown
-          capturePlot('analytics_budget_by_category') // images[7]: Budget by category
+          Promise.resolve(tblImg),           // images[0]: Budget table
+          capturePlot('viz_applied_for')     // images[1]: Applied for
         ]).then(function(images) {
           console.log('Captured images, creating PDF...');
           
@@ -2124,10 +2143,17 @@ ui <- fluidPage(
           doc.text('Budget Summary', margin + 10, margin + 15);
           
           if (images[0]) {
-            var tableAspect = doc.getImageProperties(images[0]).height / doc.getImageProperties(images[0]).width;
-            var tableW = cW - 20;
+            var tblProps = doc.getImageProperties(images[0]);
+            var tableAspect = tblProps.height / tblProps.width;
+            var maxTblW = cW - 20;
+            var maxTblH = cH - 35;  // leave room for title
+            var tableW = maxTblW;
             var tableH = tableW * tableAspect;
-            doc.addImage(images[0], 'PNG', margin + 10, margin + 25, tableW, tableH);
+            if (tableH > maxTblH) {
+              tableH = maxTblH;
+              tableW = maxTblH / tableAspect;
+            }
+            doc.addImage(images[0], 'PNG', margin + (cW - tableW) / 2, margin + 25, tableW, tableH);
           } else {
             doc.setFontSize(10);
             doc.text('Budget table not available', margin + 10, margin + 30);
@@ -2138,75 +2164,17 @@ ui <- fluidPage(
           doc.setFontSize(12);
           doc.text('Applied for Status', margin + 10, margin + 15);
           if (images[1]) {
-            doc.addImage(images[1], 'PNG', margin, margin + 25, cW - 20, (cW - 20) * 0.583);
+            var vizProps = doc.getImageProperties(images[1]);
+            var vizAspect = vizProps.height / vizProps.width;
+            var maxVizW = cW - 20;
+            var maxVizH = cH - 35;
+            var vizW2 = maxVizW;
+            var vizH2 = vizW2 * vizAspect;
+            if (vizH2 > maxVizH) { vizH2 = maxVizH; vizW2 = maxVizH / vizAspect; }
+            doc.addImage(images[1], 'PNG', margin + (cW - vizW2) / 2, margin + 25, vizW2, vizH2);
           } else {
             doc.text('Visualization not available', margin + 10, margin + 30);
           }
-
-          // Page 3: 2x2 grid (Funded, Applied elsewhere, Not applied, All statuses)
-          doc.addPage();
-          doc.setFontSize(12);
-          doc.text('All Funding Statuses Overview', margin + 10, margin + 15);
-          
-          var gridW = (cW - 20) / 2;
-          var gridH = (cH - 60) / 2;
-          
-          // Helper to add image maintaining aspect ratio
-          function addImageWithAspect(img, x, y, maxW, maxH) {
-            if (!img) return false;
-            var dims = doc.getImageProperties(img);
-            var imgAspect = dims.height / dims.width;
-            var targetW = maxW;
-            var targetH = maxW * imgAspect;
-            if (targetH > maxH) {
-              targetH = maxH;
-              targetW = maxH / imgAspect;
-            }
-            doc.addImage(img, 'PNG', x + (maxW - targetW) / 2, y, targetW, targetH);
-            return true;
-          }
-          
-          var gridPlots = [
-            { img: images[2], label: 'Funded', x: margin + 10, y: margin + 25 },
-            { img: images[3], label: 'Applied Elsewhere', x: margin + 10 + gridW + 10, y: margin + 25 },
-            { img: images[4], label: 'Not Applied for', x: margin + 10, y: margin + 25 + gridH + 10 },
-            { img: images[5], label: 'All Statuses', x: margin + 10 + gridW + 10, y: margin + 25 + gridH + 10 }
-          ];
-          
-          gridPlots.forEach(function(plot) {
-            doc.setFontSize(9);
-            doc.text(plot.label, plot.x + 5, plot.y);
-            if (plot.img) {
-              addImageWithAspect(plot.img, plot.x, plot.y + 5, gridW - 5, gridH - 15);
-            } else {
-              doc.setFontSize(8);
-              doc.text('Not available', plot.x + 5, plot.y + 20);
-            }
-          });
-
-          // Page 4: Analytics
-          doc.addPage();
-          doc.setFontSize(12);
-          doc.text('Analytics', margin + 10, margin + 15);
-          
-          var analyticsH = (cH - 80) / 2;
-          var analyticsY = margin + 30;
-          var analytics = [
-            { img: images[6], label: 'Budget by Funding Status' },
-            { img: images[7], label: 'Budget by Category' }
-          ];
-          
-          analytics.forEach(function(chart) {
-            doc.setFontSize(10);
-            doc.text(chart.label, margin + 10, analyticsY);
-            if (chart.img) {
-              addImageWithAspect(chart.img, margin, analyticsY + 5, cW - 20, analyticsH - 15);
-            } else {
-              doc.setFontSize(8);
-              doc.text('Not available', margin + 10, analyticsY + 10);
-            }
-            analyticsY += analyticsH + 5;
-          });
 
           doc.save(payload.filename || 'budget.pdf');
           console.log('PDF saved successfully');
@@ -2294,27 +2262,26 @@ ui <- fluidPage(
               selectInput(
                 "period_format",
                 "Display by time periods:",
-                choices = c("Month" = "month", "Calendar year" = "calendar_year", "Project year" = "project_year"),
+                choices = c("Project year" = "project_year", "Calendar year" = "calendar_year", "Month" = "month"),
                 selected = "project_year"
               )
             ),
             column(
-              5,
+              3,
+              selectInput(
+                "display_form",
+                "Display form:",
+                choices = c("Summary" = "summary", "Long (rows)" = "long", "Wide (columns)" = "wide"),
+                selected = "summary"
+              )
+            ),
+            column(
+              6,
               checkboxGroupInput(
                 "squash_dims",
                 "Collapse:",
                 choices = c("Period", "Post name", "Site", "Category"),
                 selected = character(0),
-                inline = TRUE
-              )
-            ),
-            column(
-              4,
-              radioButtons(
-                "display_form",
-                "Display form:",
-                choices = c("Summary" = "summary", "Long (rows)" = "long", "Wide (columns)" = "wide"),
-                selected = "summary",
                 inline = TRUE
               )
             )
@@ -4833,8 +4800,7 @@ server <- function(input, output, session) {
       tags$div(
         style = "display: flex; justify-content: space-between; align-items: baseline;",
         h4("Visualization"),
-        if (isTRUE(input$display_form == "wide"))
-          actionButton("save_pdf_btn", "Save PDF (4 pages)", class = "btn-default btn-sm", icon = icon("file-pdf"))
+        actionButton("save_pdf_btn", "Save PDF", class = "btn-default btn-sm", icon = icon("file-pdf"))
       ),
       do.call(tabsetPanel, tabs_to_show)
     )
@@ -4921,20 +4887,28 @@ server <- function(input, output, session) {
   # Columns (in order):
   #   id (hidden – used for row→post mapping),
   #   Post name, Category, Note (Note always hidden),
-  #   [period amount cols],
-  #   "  " (spacer),
-  #   [FTE period cols],
-  #   " " (spacer),
-  #   [status total cols]
-  # Structural rows (id = NA): site-header, site-total, blank separator, grand total.
+  #   [period amount cols], "  " (spacer), [FTE cols], " " (spacer),
+  #   [status total cols], application_status (hidden – for row styling)
+  # Structural rows (id = NA): blank-before-first, site-header, site-total,
+  #   blank separator, grand total.
+  # squash: character vector of collapsed dimensions
+  #   "Period"    → one "Total" column instead of per-period columns
+  #   "Post name" → one row per (site, category) instead of per-post
+  #   "Site"      → flat list, no site-header/total rows
+  #   "Category"  → handled in renderDT (hides Category column)
   # ---------------------------------------------------------------------------
   build_summary_table_data <- function(period_choice, posts_data, budget_start, budget_end,
-                                       salaries_data, inflation_pct) {
-    status_order <- c("Applied for", "Applied for elsewhere", "Not applied for", "Funded")
+                                       salaries_data, inflation_pct,
+                                       squash = character(0)) {
+    status_order    <- c("Applied for", "Applied for elsewhere", "Not applied for", "Funded")
+    collapse_period <- "Period"    %in% squash
+    collapse_post   <- "Post name" %in% squash
+    collapse_site   <- "Site"      %in% squash
 
     empty_result <- function() list(
       data        = tibble(id = integer(), `Post name` = character(),
-                           Category = character(), Note = character()),
+                           Category = character(), Note = character(),
+                           application_status = character()),
       period_cols = character(),
       fte_cols    = character(),
       status_cols = character()
@@ -4974,12 +4948,66 @@ server <- function(input, output, session) {
     post_meta <- posts_data %>%
       transmute(
         id,
-        Site           = center,
-        `Post name`    = post_name,
-        Category       = category,
-        Note           = note,
+        Site               = center,
+        `Post name`        = post_name,
+        Category           = category,
+        Note               = note,
         application_status = if_else(is.na(application_status), "Applied for", application_status)
       )
+
+    # ---- "Post name" collapse: aggregate to (site, category) level ----
+    if (collapse_post) {
+      group_map <- post_meta %>%
+        distinct(Site, Category) %>%
+        arrange(Site, Category) %>%
+        mutate(group_id = -seq_len(n()))   # negative ids distinct from real post ids
+
+      id_to_group <- post_meta %>%
+        select(id, Site, Category, application_status) %>%
+        left_join(group_map, by = c("Site", "Category"))
+
+      post_period <- post_period %>%
+        left_join(id_to_group %>% select(id, group_id), by = "id") %>%
+        group_by(group_id, Period) %>%
+        summarise(
+          amount     = sum(amount,     na.rm = TRUE),
+          period_fte = sum(period_fte, na.rm = TRUE),
+          .groups = "drop"
+        ) %>%
+        rename(id = group_id)
+
+      post_meta <- id_to_group %>%
+        group_by(group_id, Site, Category) %>%
+        summarise(
+          application_status = {
+            s <- application_status
+            if (any(s == "Applied for")) "Applied for"
+            else s[which.min(match(s, status_order))]
+          },
+          .groups = "drop"
+        ) %>%
+        transmute(
+          id                 = group_id,
+          Site               = Site,
+          `Post name`        = if_else(!is.na(Category) & nzchar(Category),
+                                       Category, "(Uncategorised)"),
+          Category           = Category,
+          Note               = NA_character_,
+          application_status = application_status
+        )
+    }
+
+    # ---- "Period" collapse: aggregate all periods → one "Total" ----
+    if (collapse_period) {
+      post_period <- post_period %>%
+        group_by(id) %>%
+        summarise(
+          amount     = sum(amount,     na.rm = TRUE),
+          period_fte = sum(period_fte, na.rm = TRUE),
+          .groups = "drop"
+        ) %>%
+        mutate(Period = "Total")
+    }
 
     all_periods <- sort(unique(post_period$Period))
     period_cols <- all_periods
@@ -5002,7 +5030,7 @@ server <- function(input, output, session) {
     for (col in fte_cols)    if (!col %in% names(df)) df[[col]] <- NA_real_
 
     statuses_present <- intersect(status_order, unique(post_meta$application_status))
-    status_cols <- statuses_present
+    status_cols      <- statuses_present
 
     post_status_totals <- post_period %>%
       left_join(post_meta %>% select(id, application_status), by = "id") %>%
@@ -5016,14 +5044,11 @@ server <- function(input, output, session) {
       df <- df %>% left_join(st_totals %>% rename(!!st := total), by = "id")
     }
 
-    # Final column order: id, Post name, Category, Note, [periods], "  ", [FTE cols], " ", [status cols]
-    # Site column dropped – replaced by site-header rows
+    # Keep Site + application_status temporarily for row-building loop
     df <- df %>%
       select(id, `Post name`, Category, Note,
-             all_of(period_cols),
-             all_of(fte_cols),
-             all_of(status_cols),
-             Site, application_status)   # keep Site + status temporarily for grouping
+             all_of(period_cols), all_of(fte_cols), all_of(status_cols),
+             Site, application_status)
 
     num_cols <- c(period_cols, fte_cols, status_cols)
 
@@ -5031,7 +5056,7 @@ server <- function(input, output, session) {
     rows_list   <- list()
     site_totals <- list()
 
-    # Helper: build an NA structural row with same schema (id=NA)
+    # Helper: build an all-NA structural row with same schema (id = NA)
     make_na_row <- function(df_template) {
       r <- df_template[0L, ][1L, ]
       r[1L, ] <- NA
@@ -5039,34 +5064,46 @@ server <- function(input, output, session) {
       r
     }
 
+    first_site <- TRUE
     for (site in sites_vec) {
       site_posts <- df %>% filter(Site == site)
 
-      # Site header row (bold label, all numeric NA)
-      hdr_row <- make_na_row(df)
-      hdr_row$`Post name` <- site          # site name in Post name column
-      rows_list <- c(rows_list, list(hdr_row))
+      if (!collapse_site) {
+        # Blank row before very first site header
+        if (first_site) {
+          rows_list <- c(rows_list, list(make_na_row(df)))
+          first_site <- FALSE
+        }
+        # Site header row (bold + grey, same as site total)
+        hdr_row <- make_na_row(df)
+        hdr_row$`Post name` <- site
+        rows_list <- c(rows_list, list(hdr_row))
+      }
 
       rows_list <- c(rows_list, list(site_posts))
 
-      # Site total row
-      st_row <- site_posts %>%
-        summarise(across(all_of(num_cols), ~ sum(.x, na.rm = TRUE)))
-      st_row <- bind_cols(
-        tibble(id = NA_integer_, `Post name` = "Site total",
-               Category = NA_character_, Note = NA_character_),
-        st_row,
-        tibble(Site = site, application_status = NA_character_)
-      )
-      st_row <- st_row[, names(df), drop = FALSE]
-      rows_list   <- c(rows_list, list(st_row))
-      site_totals <- c(site_totals, list(st_row))
-
-      # Blank separator
-      rows_list <- c(rows_list, list(make_na_row(df)))
+      if (!collapse_site) {
+        # Site total row
+        st_row <- site_posts %>%
+          summarise(across(all_of(num_cols), ~ sum(.x, na.rm = TRUE)))
+        st_row <- bind_cols(
+          tibble(id = NA_integer_, `Post name` = "Site total",
+                 Category = NA_character_, Note = NA_character_),
+          st_row,
+          tibble(Site = site, application_status = NA_character_)
+        )
+        st_row <- st_row[, names(df), drop = FALSE]
+        rows_list   <- c(rows_list, list(st_row))
+        site_totals <- c(site_totals, list(st_row))
+        # Blank separator after each site block
+        rows_list <- c(rows_list, list(make_na_row(df)))
+      } else {
+        # No site headers/totals; collect raw post rows for grand total
+        site_totals <- c(site_totals, list(site_posts))
+      }
     }
 
-    # Grand total
+    # Grand total (sum site-total rows when !collapse_site, or all post rows otherwise)
     site_totals_df <- bind_rows(site_totals)
     grand_row <- site_totals_df %>%
       summarise(across(all_of(num_cols), ~ sum(.x, na.rm = TRUE)))
@@ -5081,21 +5118,21 @@ server <- function(input, output, session) {
 
     result <- bind_rows(rows_list)
 
-    # Now drop Site and application_status; insert spacer columns at right places
+    # Drop Site; insert spacer columns; keep application_status as last (hidden) column
     spacer1 <- "  "   # between period cols and FTE cols
     spacer2 <- " "    # between FTE cols and status cols
     result <- result %>%
-      select(-Site, -application_status) %>%
+      select(-Site) %>%
       mutate(!!spacer1 := NA_character_, !!spacer2 := NA_character_)
 
-    # Reorder: id, Post name, Category, Note, periods, spacer1, FTE, spacer2, status
     result <- result %>%
       select(id, `Post name`, Category, Note,
              all_of(period_cols),
              !!spacer1,
              all_of(fte_cols),
              !!spacer2,
-             all_of(status_cols))
+             all_of(status_cols),
+             application_status)
 
     list(
       data        = result,
@@ -5574,12 +5611,14 @@ server <- function(input, output, session) {
 
   output$summary_form_table <- renderDT({
     req(input$display_form == "summary")
-    show_fte <- isTRUE(input$summary_show_fte)
+    show_fte     <- isTRUE(input$summary_show_fte)
+    squash_dims  <- input$squash_dims %||% character(0)
 
     summ <- build_summary_table_data(
       input$period_format, rv$posts,
       input$budget_start, input$budget_end,
-      rv$salaries, input$inflation_pct
+      rv$salaries, input$inflation_pct,
+      squash = squash_dims
     )
     df          <- summ$data
     period_cols <- summ$period_cols
@@ -5594,28 +5633,29 @@ server <- function(input, output, session) {
       ))
     }
 
-    col_names   <- names(df)
+    col_names      <- names(df)
+    n_cols         <- length(col_names)
+
     # 0-based column indices
-    idx_id       <- 0L
-    idx_postname <- 1L
-    idx_category <- 2L
-    idx_note     <- 3L
-    idx_fte_cols <- which(col_names %in% fte_cols) - 1L
-    idx_spacer1  <- which(col_names == "  ") - 1L   # between periods and FTE
-    idx_spacer2  <- which(col_names == " ")  - 1L   # between FTE and status
+    idx_id         <- 0L
+    idx_note       <- 3L
+    idx_app_status <- n_cols - 1L          # application_status is always last
+    idx_fte_cols   <- which(col_names %in% fte_cols) - 1L
+    idx_spacer1    <- which(col_names == "  ") - 1L   # between periods and FTE
+    idx_spacer2    <- which(col_names == " ")  - 1L   # between FTE and status
 
-    # Always hidden: id (0), Note (3)
-    always_hidden <- c(idx_id, idx_note)
-    # Conditionally hidden: spacer1, FTE cols (hidden when FTE checkbox off)
-    fte_hidden <- if (!show_fte) c(idx_spacer1, idx_fte_cols) else integer(0)
+    # Always hidden
+    always_hidden <- c(idx_id, idx_note, idx_app_status)
+    # FTE cols (+ their spacer) hidden when checkbox unchecked
+    fte_hidden    <- if (!show_fte) c(idx_spacer1, idx_fte_cols) else integer(0)
+    # Category col hidden when "Category" is in squash
+    cat_hidden    <- if ("Category" %in% squash_dims) 2L else integer(0)
 
-    hidden_cols <- unique(c(always_hidden, fte_hidden))
+    hidden_cols <- unique(c(always_hidden, fte_hidden, cat_hidden))
 
     col_defs <- list(
       list(targets = as.list(hidden_cols), visible = FALSE),
-      # Spacer cols: no header, not sortable, narrow
       list(targets = as.list(c(idx_spacer1, idx_spacer2)), orderable = FALSE, title = ""),
-      # Status cols: bold
       list(targets = as.list(which(col_names %in% status_cols) - 1L),
            className = "dt-summary-status")
     )
@@ -5633,10 +5673,12 @@ server <- function(input, output, session) {
         columnDefs  = col_defs,
         rowCallback = JS(
           "function(row, data, index) {",
-          "  var id    = data[0];",   # hidden id col
-          "  var pname = typeof data[1] === 'string' ? data[1] : '';",
+          # data[0]=id, data[1]=Post name, data[last]=application_status
+          "  var id         = data[0];",
+          "  var pname      = typeof data[1] === 'string' ? data[1] : '';",
+          "  var appStatus  = data[data.length - 1];",
           "  var isStructural = (id === null || id === '' || id === 'NA' ||",
-          "                      id === null || typeof id !== 'number');",
+          "                      typeof id !== 'number');",
           "  if (pname === 'Grand total') {",
           "    $(row).css({'font-weight':'700','background-color':'#e4e4e4'});",
           "    $(row).addClass('summary-structural');",
@@ -5644,18 +5686,20 @@ server <- function(input, output, session) {
           "    $(row).css({'font-weight':'700','background-color':'#f1f1f1'});",
           "    $(row).addClass('summary-structural');",
           "  } else if (isStructural && pname !== '' && pname !== null) {",
-          "    // Site header row",
-          "    $(row).css({'font-weight':'700','background-color':'#f8f8f8'});",
+          "    // Site header row – same style as site total",
+          "    $(row).css({'font-weight':'700','background-color':'#f1f1f1'});",
           "    $(row).addClass('summary-structural');",
           "  } else if (isStructural) {",
-          "    // Blank separator",
+          "    // Blank separator row",
           "    $(row).css({'line-height':'8px'});",
           "    $('td', row).text('');",
           "    $(row).addClass('summary-structural');",
+          "  } else if (appStatus && appStatus !== 'Applied for') {",
+          "    // Non-applied-for post row: italic + muted colour",
+          "    $(row).css({'font-style':'italic','color':'#888888'});",
           "  }",
           "}"
         ),
-        # Prevent structural rows from being selected
         drawCallback = JS(
           "function() {",
           "  var api = this.api();",
@@ -5669,7 +5713,6 @@ server <- function(input, output, session) {
     if (length(round_cols_present) > 0)
       dt <- dt %>% formatRound(columns = round_cols_present, digits = 2, interval = 3, mark = ",")
 
-    # Remove selection highlight from structural rows via CSS class override
     dt <- dt %>% htmlwidgets::onRender(
       "function(el, x) {
         var api = $(el).find('table').DataTable();
@@ -5693,7 +5736,8 @@ server <- function(input, output, session) {
       summ <- build_summary_table_data(
         input$period_format, rv$posts,
         input$budget_start, input$budget_end,
-        rv$salaries, input$inflation_pct
+        rv$salaries, input$inflation_pct,
+        squash = input$squash_dims %||% character(0)
       )
       if (!nrow(summ$data)) return(NA_integer_)
       row_idx <- as.integer(sel[[1]])
@@ -6481,8 +6525,11 @@ server <- function(input, output, session) {
         ungroup() %>%
         mutate(center = "ALL_SITES_TOTAL", facet = "All sites")
 
-      bind_rows(agg_data, all_sites_data) %>%
-        mutate(facet = factor(facet, levels = c(sort(unique(agg_data$center)), "All sites")))
+      multi_site <- length(all_centers) > 1
+      combined <- if (multi_site) bind_rows(agg_data, all_sites_data) else agg_data
+      facet_levels <- if (multi_site) c(sort(unique(agg_data$center)), "All sites") else sort(unique(agg_data$center))
+      combined %>%
+        mutate(facet = factor(facet, levels = facet_levels))
     })
   }
 
@@ -6548,8 +6595,14 @@ server <- function(input, output, session) {
       ungroup() %>%
       mutate(center = "All sites", facet = "All sites")
     
-    result <- bind_rows(agg_data, all_sites_raw) %>%
-      mutate(facet = factor(facet, levels = c(sort(unique(agg_data$center)), "All sites")))
+    multi_site <- length(all_centers) > 1
+    result <- if (multi_site) {
+      bind_rows(agg_data, all_sites_raw) %>%
+        mutate(facet = factor(facet, levels = c(sort(unique(agg_data$center)), "All sites")))
+    } else {
+      agg_data %>%
+        mutate(facet = factor(facet, levels = sort(unique(agg_data$center))))
+    }
     
     result
   })
@@ -6932,7 +6985,12 @@ server <- function(input, output, session) {
 
   observeEvent(input$save_pdf_btn, {
     fname <- paste0(workbook_name_effective(), "_budget_", format(Sys.Date(), "%Y%m%d"), ".pdf")
-    session$sendCustomMessage("save-pdf", list(filename = fname))
+    table_id <- switch(input$display_form %||% "summary",
+      "wide"    = "#wide_form_table",
+      "long"    = "#posts_table",
+      "#summary_form_table"   # default: summary
+    )
+    session$sendCustomMessage("save-pdf", list(filename = fname, tableId = table_id))
   })
 
 
@@ -7169,10 +7227,20 @@ server <- function(input, output, session) {
                                                     salaries_data, inflation_pct) {
     summ   <- build_summary_table_data(period_choice, posts_data, budget_start, budget_end,
                                        salaries_data, inflation_pct)
-    result <- summ$data %>% select(-id)   # id is only for interactive DT row selection
-    attr(result, "summary_status_cols") <- summ$status_cols
-    attr(result, "summary_period_cols") <- summ$period_cols
-    attr(result, "summary_fte_cols")    <- summ$fte_cols
+    d <- summ$data
+    # Detect site-header rows before dropping id:
+    #   id=NA, Post name is non-blank and not "Site total" / "Grand total"
+    pnames <- d[["Post name"]]
+    row_is_site_header <- is.na(d$id) &
+      !is.na(pnames) & nzchar(pnames) &
+      pnames != "Site total" & pnames != "Grand total"
+    row_app_status <- d$application_status
+    result <- d %>% select(-id, -application_status)
+    attr(result, "row_application_status") <- row_app_status
+    attr(result, "row_is_site_header")     <- row_is_site_header
+    attr(result, "summary_status_cols")    <- summ$status_cols
+    attr(result, "summary_period_cols")    <- summ$period_cols
+    attr(result, "summary_fte_cols")       <- summ$fte_cols
     result
   }
 
@@ -7350,9 +7418,12 @@ server <- function(input, output, session) {
 
   to_js_sheet <- function(df, has_total_row = FALSE) {
     # Extract metadata attributes
-    post_col_status     <- attr(df, "post_col_status")     %||% character(0)
-    status_total_labels <- attr(df, "status_total_labels") %||% character(0)
-    summary_status_cols <- attr(df, "summary_status_cols") %||% character(0)
+    post_col_status       <- attr(df, "post_col_status")       %||% character(0)
+    status_total_labels   <- attr(df, "status_total_labels")   %||% character(0)
+    summary_status_cols   <- attr(df, "summary_status_cols")   %||% character(0)
+    summary_fte_cols      <- attr(df, "summary_fte_cols")       %||% character(0)
+    row_application_status <- attr(df, "row_application_status") %||% character(0)
+    row_is_site_header      <- attr(df, "row_is_site_header")     %||% logical(0)
     is_summary <- length(summary_status_cols) > 0
 
     # Build colMeta
@@ -7362,26 +7433,34 @@ server <- function(input, output, session) {
       col_idx  <- as.character(i - 1)
       status   <- post_col_status[col_name] %||% NA_character_
       is_total_col <- col_name %in% summary_status_cols
+      is_fte_col   <- col_name %in% summary_fte_cols
 
       colMeta[[col_idx]] <- list(
         isNonAppliedFor = !is.na(status) && status != "Applied for",
-        isTotalCol      = is_total_col
+        isTotalCol      = is_total_col,
+        isFteCol        = is_fte_col
       )
     }
 
     # Build rowMeta
     rowMeta <- list()
     if (is_summary) {
-      # Summary sheet: site-total rows and grand-total row get isTotalRow
       post_name_col <- if ("Post name" %in% names(df)) df[["Post name"]] else rep(NA_character_, nrow(df))
       for (i in seq_len(nrow(df))) {
         pname <- post_name_col[[i]]
+        ast   <- if (i <= length(row_application_status)) row_application_status[[i]] else NA_character_
         is_site_total  <- !is.na(pname) && pname == "Site total"
         is_grand_total <- !is.na(pname) && pname == "Grand total"
+        is_non_applied  <- !is.na(ast) && nzchar(ast) && ast != "Applied for"
+        is_site_hdr     <- if (i <= length(row_is_site_header)) isTRUE(row_is_site_header[[i]]) else FALSE
+        is_blank_row    <- is.na(pname) && !is_site_hdr && !is_site_total && !is_grand_total
         rowMeta[[i]] <- list(
-          isStatusTotal = is_site_total,
-          isGrandTotal  = is_grand_total,
-          isTotalRow    = is_site_total || is_grand_total
+          isStatusTotal   = is_site_total,
+          isGrandTotal    = is_grand_total,
+          isTotalRow      = is_site_total || is_grand_total,
+          isSiteHeader    = is_site_hdr,
+          isBlankRow      = is_blank_row,
+          isNonAppliedFor = is_non_applied
         )
       }
     } else {
@@ -7391,9 +7470,10 @@ server <- function(input, output, session) {
         is_status_total <- period_val %in% status_total_labels
         is_grand_total  <- !is.na(period_val) && period_val == "TOTAL"
         rowMeta[[i]] <- list(
-          isStatusTotal = is_status_total,
-          isGrandTotal  = is_grand_total,
-          isTotalRow    = is_status_total || is_grand_total
+          isStatusTotal   = is_status_total,
+          isGrandTotal    = is_grand_total,
+          isTotalRow      = is_status_total || is_grand_total,
+          isNonAppliedFor = FALSE
         )
       }
     }
@@ -7460,13 +7540,8 @@ server <- function(input, output, session) {
 
         # Build sheets using parameterized functions (no reactive access needed)
         sheets <- list(
-          summary              = to_js_sheet(build_export_summary_sheet_with_data("project_year", posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot), has_total_row = TRUE),
-          by_project_year_wide  = to_js_sheet(build_export_wide_sheet_with_data("project_year",  posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
-          by_project_year_long  = to_js_sheet(build_export_sheet_with_data("project_year",       posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
-          #by_calendar_year_wide = to_js_sheet(build_export_wide_sheet_with_data("calendar_year", posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
-          #by_calendar_year_long = to_js_sheet(build_export_sheet_with_data("calendar_year",      posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
-          #by_month_wide         = to_js_sheet(build_export_wide_sheet_with_data("month",         posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
-          #by_month_long         = to_js_sheet(build_export_sheet_with_data("month",              posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
+          summary_project_year   = to_js_sheet(build_export_summary_sheet_with_data("project_year",  posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot), has_total_row = TRUE),
+          summary_calendar_year  = to_js_sheet(build_export_summary_sheet_with_data("calendar_year", posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot), has_total_row = TRUE),
           posts                 = to_js_sheet(serialize_posts(posts_snapshot)),
           inactive_posts        = to_js_sheet(serialize_inactive_posts(isolate(rv$inactive_posts))),
           salaries              = to_js_sheet(serialize_salaries(salaries_copy)),
