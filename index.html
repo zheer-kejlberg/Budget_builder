@@ -1864,7 +1864,8 @@ ui &lt;- fluidPage(
               var colMetaEntry = colMeta[colIdxStr] || {};
               var isNonAppliedFor = colMetaEntry.isNonAppliedFor;
               var colName = columns.length &gt; C ? columns[C] : '';
-              var isTotalCol = colName === 'All sites &gt; Total' || /&gt; Site total$/.test(colName);
+              var isTotalCol = colMetaEntry.isTotalCol ||
+                colName === 'All sites &gt; Total' || /&gt; Site total$/.test(colName);
               
               var style = {};
               
@@ -2404,8 +2405,8 @@ ui &lt;- fluidPage(
               radioButtons(
                 "display_form",
                 "Display form:",
-                choices = c("Long (rows)" = "long", "Wide (columns)" = "wide"),
-                selected = "wide",
+                choices = c("Summary" = "summary", "Long (rows)" = "long", "Wide (columns)" = "wide"),
+                selected = "summary",
                 inline = TRUE
               )
             )
@@ -4982,6 +4983,8 @@ server &lt;- function(input, output, session) {
         uiOutput("wide_total_checkboxes"),
         DTOutput("wide_form_table")
       )
+    } else if (isTRUE(input$display_form == "summary")) {
+      DTOutput("summary_form_table")
     } else {
       DTOutput("posts_table")
     }
@@ -4997,6 +5000,192 @@ server &lt;- function(input, output, session) {
     squash &lt;- input$squash_dims
     if (is.null(squash)) squash &lt;- character(0)
     if ("Category" %in% squash) "category" else "post"
+  }
+
+  # ---------------------------------------------------------------------------
+  # build_summary_table_data
+  # Returns a one-row-per-post table pivoted wide by period.
+  # Columns: Site, Post name, Category, Note,
+  #          [period amount cols], [FTE period cols],
+  #          " " (spacer), [status total cols]
+  # Followed by: per-site total rows, blank separator rows, grand total row.
+  # ---------------------------------------------------------------------------
+  build_summary_table_data &lt;- function(period_choice, posts_data, budget_start, budget_end,
+                                       salaries_data, inflation_pct) {
+    status_order &lt;- c("Applied for", "Applied for elsewhere", "Not applied for", "Funded")
+
+    if (!nrow(posts_data)) {
+      return(list(
+        data        = tibble(Site = character(), `Post name` = character(),
+                             Category = character(), Note = character()),
+        period_cols = character(),
+        fte_cols    = character(),
+        status_cols = character()
+      ))
+    }
+
+    long &lt;- build_long_budget(
+      posts_data, budget_start, budget_end,
+      salaries_lookup = make_salary_lookup(salaries_data),
+      inflation_pct = inflation_pct, salaries_tbl = salaries_data
+    )
+    if (!nrow(long)) {
+      return(list(
+        data        = tibble(Site = character(), `Post name` = character(),
+                             Category = character(), Note = character()),
+        period_cols = character(),
+        fte_cols    = character(),
+        status_cols = character()
+      ))
+    }
+
+    meta &lt;- posts_data %&gt;%
+      select(id, start_date, end_date, note, needs_amendment, application_status)
+
+    # Build Period label, then aggregate monthly rows to (id, Period)
+    combined &lt;- long %&gt;%
+      left_join(meta, by = "id") %&gt;%
+      mutate(
+        Period = case_when(
+          period_choice == "month"         ~ period_month,
+          period_choice == "calendar_year" ~ as.character(calendar_year),
+          TRUE                             ~ paste0("Year ", project_year)
+        ),
+        application_status = if_else(is.na(application_status), "Applied for", application_status)
+      )
+
+    # Per-post-period: sum amount, compute period-specific FTE
+    post_period &lt;- combined %&gt;%
+      group_by(id, Period) %&gt;%
+      summarise(
+        amount      = sum(value),
+        period_fte  = first(fte) * n() / 12,
+        .groups = "drop"
+      )
+
+    # Post-level metadata (constant across periods)
+    post_meta &lt;- posts_data %&gt;%
+      transmute(
+        id,
+        Site     = center,
+        `Post name` = post_name,
+        Category = category,
+        Note     = note,
+        application_status = if_else(is.na(application_status), "Applied for", application_status)
+      )
+
+    # Determine ordered period names
+    all_periods &lt;- sort(unique(post_period$Period))
+
+    # Pivot amounts wide
+    amounts_wide &lt;- post_period %&gt;%
+      select(id, Period, amount) %&gt;%
+      tidyr::pivot_wider(names_from = Period, values_from = amount,
+                         values_fill = NA_real_)
+
+    # Pivot FTE wide (rename cols to "FTE &lt;period&gt;")
+    fte_wide &lt;- post_period %&gt;%
+      select(id, Period, period_fte) %&gt;%
+      tidyr::pivot_wider(names_from = Period, values_from = period_fte,
+                         values_fill = NA_real_) %&gt;%
+      rename_with(~ paste0("FTE ", .), .cols = -id)
+
+    period_cols &lt;- all_periods
+    fte_cols    &lt;- paste0("FTE ", all_periods)
+
+    # Join everything together
+    df &lt;- post_meta %&gt;%
+      left_join(amounts_wide, by = "id") %&gt;%
+      left_join(fte_wide,     by = "id")
+
+    # Ensure all expected period/FTE cols present (in case a post spans only part)
+    for (col in period_cols) if (!col %in% names(df)) df[[col]] &lt;- NA_real_
+    for (col in fte_cols)    if (!col %in% names(df)) df[[col]] &lt;- NA_real_
+
+    # Add spacer column
+    df[[" "]] &lt;- NA_character_
+
+    # Determine which statuses are present
+    statuses_present &lt;- intersect(status_order,
+                                  unique(post_meta$application_status))
+    status_cols &lt;- statuses_present
+
+    # Per-post status amount totals (sum across all periods for that post)
+    post_status_totals &lt;- post_period %&gt;%
+      left_join(post_meta %&gt;% select(id, application_status), by = "id") %&gt;%
+      group_by(id, application_status) %&gt;%
+      summarise(total = sum(amount), .groups = "drop")
+
+    for (st in status_cols) {
+      st_totals &lt;- post_status_totals %&gt;%
+        filter(application_status == st) %&gt;%
+        select(id, total)
+      df &lt;- df %&gt;%
+        left_join(st_totals %&gt;% rename(!!st := total), by = "id")
+    }
+
+    # Drop id and application_status helper cols; reorder
+    df &lt;- df %&gt;%
+      select(-id, -application_status,
+             Site, `Post name`, Category, Note,
+             all_of(period_cols), all_of(fte_cols),
+             " ", all_of(status_cols))
+
+    # Build numeric cols vector (all period + fte + status cols)
+    num_cols &lt;- c(period_cols, fte_cols, status_cols)
+
+    # ----- build structured rows: posts + site totals + separators + grand total -----
+    sites_vec &lt;- unique(df$Site)
+
+    rows_list    &lt;- list()
+    site_totals  &lt;- list()  # collect site-total rows for grand-total summing
+
+    for (site in sites_vec) {
+      site_posts &lt;- df %&gt;% filter(Site == site)
+      rows_list &lt;- c(rows_list, list(site_posts))
+
+      # Site total row: sum all numeric cols across site's posts
+      st_row &lt;- site_posts %&gt;%
+        summarise(across(all_of(num_cols), ~ sum(.x, na.rm = TRUE)))
+      st_row &lt;- bind_cols(
+        tibble(Site = site, `Post name` = "Site total",
+               Category = NA_character_, Note = NA_character_),
+        st_row,
+        tibble(" " = NA_character_)
+      )
+      # Reorder to match df column order
+      st_row &lt;- st_row[, names(df), drop = FALSE]
+      rows_list   &lt;- c(rows_list, list(st_row))
+      site_totals &lt;- c(site_totals, list(st_row))
+
+      # Blank separator
+      blank_row &lt;- df[0, ][1, ]  # one NA row with same schema
+      blank_row[1, ] &lt;- NA
+      blank_row$Site &lt;- NA_character_
+      rows_list &lt;- c(rows_list, list(blank_row))
+    }
+
+    # Grand total row: sum of site-total rows only
+    site_totals_df &lt;- bind_rows(site_totals)
+    grand_row &lt;- site_totals_df %&gt;%
+      summarise(across(all_of(num_cols), ~ sum(.x, na.rm = TRUE)))
+    grand_row &lt;- bind_cols(
+      tibble(Site = NA_character_, `Post name` = "Grand total",
+             Category = NA_character_, Note = NA_character_),
+      grand_row,
+      tibble(" " = NA_character_)
+    )
+    grand_row &lt;- grand_row[, names(df), drop = FALSE]
+    rows_list &lt;- c(rows_list, list(grand_row))
+
+    result &lt;- bind_rows(rows_list)
+
+    list(
+      data        = result,
+      period_cols = period_cols,
+      fte_cols    = fte_cols,
+      status_cols = status_cols
+    )
   }
 
   build_wide_from_long &lt;- function(long_df, include_site_totals = TRUE, column_mode = c("post", "category")) {
@@ -5465,6 +5654,74 @@ server &lt;- function(input, output, session) {
 
     dt
   })
+
+  output$summary_form_table &lt;- renderDT({
+    req(input$display_form == "summary")
+
+    summ &lt;- build_summary_table_data(
+      input$period_format, rv$posts,
+      input$budget_start, input$budget_end,
+      rv$salaries, input$inflation_pct
+    )
+    df          &lt;- summ$data
+    period_cols &lt;- summ$period_cols
+    fte_cols    &lt;- summ$fte_cols
+    status_cols &lt;- summ$status_cols
+
+    if (!nrow(df)) {
+      return(datatable(
+        tibble(Message = "No posts to display. Add posts or adjust filters."),
+        colnames = "", rownames = FALSE,
+        options = list(dom = "t", paging = FALSE, searching = FALSE, ordering = FALSE)
+      ))
+    }
+
+    amount_cols &lt;- c(period_cols, status_cols)
+    round_cols  &lt;- c(period_cols, fte_cols, status_cols)
+
+    # Row-type sentinels (used in rowCallback)
+    dt &lt;- datatable(
+      df,
+      rownames  = FALSE,
+      selection = "none",
+      options = list(
+        pageLength = 100,
+        lengthMenu = list(c(50, 100, -1), c("50", "100", "All")),
+        searching  = FALSE,
+        ordering   = FALSE,
+        scrollX    = TRUE,
+        dom        = "t",
+        rowCallback = JS(
+          "function(row, data) {",
+          "  var site  = typeof data[0] === 'string' ? data[0] : '';",
+          "  var pname = typeof data[1] === 'string' ? data[1] : '';",
+          "  if (pname === 'Site total') {",
+          "    $(row).css({'font-weight':'700', 'background-color':'#f1f1f1'});",
+          "  } else if (pname === 'Grand total') {",
+          "    $(row).css({'font-weight':'700', 'background-color':'#e4e4e4'});",
+          "  } else if (site === '' || site === null || (typeof site === 'object' &amp;&amp; site === null)) {",
+          "    $(row).css({'background-color':'#ffffff', 'line-height':'8px'});",
+          "    $('td', row).text('');",
+          "  }",
+          "}"
+        )
+      )
+    )
+
+    if (length(round_cols) &gt; 0) {
+      round_cols_present &lt;- intersect(round_cols, names(df))
+      if (length(round_cols_present) &gt; 0)
+        dt &lt;- dt %&gt;% formatRound(columns = round_cols_present, digits = 2, interval = 3, mark = ",")
+    }
+
+    if (length(status_cols) &gt; 0) {
+      status_cols_present &lt;- intersect(status_cols, names(df))
+      if (length(status_cols_present) &gt; 0)
+        dt &lt;- dt %&gt;% formatStyle(columns = status_cols_present, fontWeight = "bold")
+    }
+
+    dt
+  }, server = FALSE)
 
   selected_post_id &lt;- reactive({
     if (identical(input$display_form, "wide")) {
@@ -6923,6 +7180,16 @@ server &lt;- function(input, output, session) {
     result
   }
 
+  build_export_summary_sheet_with_data &lt;- function(period_choice, posts_data, budget_start, budget_end,
+                                                    salaries_data, inflation_pct) {
+    summ   &lt;- build_summary_table_data(period_choice, posts_data, budget_start, budget_end,
+                                       salaries_data, inflation_pct)
+    result &lt;- summ$data
+    attr(result, "summary_status_cols") &lt;- summ$status_cols
+    attr(result, "summary_period_cols") &lt;- summ$period_cols
+    attr(result, "summary_fte_cols")    &lt;- summ$fte_cols
+    result
+  }
 
   build_export_sheet &lt;- function(period_choice) {
     if (!nrow(rv$posts)) {
@@ -7097,38 +7364,53 @@ server &lt;- function(input, output, session) {
   }
 
   to_js_sheet &lt;- function(df, has_total_row = FALSE) {
-    # Extract metadata attributes if they exist
-    post_col_status &lt;- attr(df, "post_col_status") %||% character(0)
+    # Extract metadata attributes
+    post_col_status     &lt;- attr(df, "post_col_status")     %||% character(0)
     status_total_labels &lt;- attr(df, "status_total_labels") %||% character(0)
-    
-    # Build colMeta: for each column, track if it's a non-"Applied for" post
+    summary_status_cols &lt;- attr(df, "summary_status_cols") %||% character(0)
+    is_summary &lt;- length(summary_status_cols) &gt; 0
+
+    # Build colMeta
     colMeta &lt;- list()
     for (i in seq_along(names(df))) {
       col_name &lt;- names(df)[i]
-      col_idx &lt;- as.character(i - 1)  # 0-based index for JavaScript
-      status &lt;- post_col_status[col_name] %||% NA_character_
-      
-      # Mark columns that are not "Applied for" posts
-      if (!is.na(status) &amp;&amp; status != "Applied for") {
-        colMeta[[col_idx]] &lt;- list(isNonAppliedFor = TRUE)
-      } else {
-        colMeta[[col_idx]] &lt;- list(isNonAppliedFor = FALSE)
-      }
-    }
-    
-    # Build rowMeta: for each row, track if it's a status total row or grand total
-    rowMeta &lt;- list()
-    periods &lt;- df$Period
-    for (i in seq_along(periods)) {
-      period_val &lt;- periods[i]
-      is_status_total &lt;- period_val %in% status_total_labels
-      is_grand_total &lt;- period_val == "TOTAL"
-      
-      rowMeta[[i]] &lt;- list(
-        isStatusTotal = is_status_total,
-        isGrandTotal = is_grand_total,
-        isTotalRow = is_status_total || is_grand_total
+      col_idx  &lt;- as.character(i - 1)
+      status   &lt;- post_col_status[col_name] %||% NA_character_
+      is_total_col &lt;- col_name %in% summary_status_cols
+
+      colMeta[[col_idx]] &lt;- list(
+        isNonAppliedFor = !is.na(status) &amp;&amp; status != "Applied for",
+        isTotalCol      = is_total_col
       )
+    }
+
+    # Build rowMeta
+    rowMeta &lt;- list()
+    if (is_summary) {
+      # Summary sheet: site-total rows and grand-total row get isTotalRow
+      post_name_col &lt;- if ("Post name" %in% names(df)) df[["Post name"]] else rep(NA_character_, nrow(df))
+      for (i in seq_len(nrow(df))) {
+        pname &lt;- post_name_col[[i]]
+        is_site_total  &lt;- !is.na(pname) &amp;&amp; pname == "Site total"
+        is_grand_total &lt;- !is.na(pname) &amp;&amp; pname == "Grand total"
+        rowMeta[[i]] &lt;- list(
+          isStatusTotal = is_site_total,
+          isGrandTotal  = is_grand_total,
+          isTotalRow    = is_site_total || is_grand_total
+        )
+      }
+    } else {
+      periods &lt;- df$Period
+      for (i in seq_along(periods)) {
+        period_val      &lt;- periods[[i]]
+        is_status_total &lt;- period_val %in% status_total_labels
+        is_grand_total  &lt;- !is.na(period_val) &amp;&amp; period_val == "TOTAL"
+        rowMeta[[i]] &lt;- list(
+          isStatusTotal = is_status_total,
+          isGrandTotal  = is_grand_total,
+          isTotalRow    = is_status_total || is_grand_total
+        )
+      }
     }
     
     list(
@@ -7193,6 +7475,7 @@ server &lt;- function(input, output, session) {
 
         # Build sheets using parameterized functions (no reactive access needed)
         sheets &lt;- list(
+          summary              = to_js_sheet(build_export_summary_sheet_with_data("project_year", posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot), has_total_row = TRUE),
           by_project_year_wide  = to_js_sheet(build_export_wide_sheet_with_data("project_year",  posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
           by_project_year_long  = to_js_sheet(build_export_sheet_with_data("project_year",       posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
           #by_calendar_year_wide = to_js_sheet(build_export_wide_sheet_with_data("calendar_year", posts_snapshot, budget_start_snapshot, budget_end_snapshot, salaries_snapshot, inflation_pct_snapshot, squash_dims_snapshot), has_total_row = TRUE),
