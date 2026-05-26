@@ -107,17 +107,17 @@ end_default &lt;- start_default %m+% years(5) - days(1)
 
 categories &lt;- c(
   "Salary, clinician",
-  "Salary for technicians",
-  "Salary Ph.D. students",
-  "Tuition fees for Ph.D. students",
-  "Salary for postdocs",
-  "Salary for research year (RY)",
+  "Salary, technicians",
+  "Salary, Ph.D. students",
+  "Ph.D., tuition fees",
+  "Salary, postdocs",
+  "Salary, research year",
   "Salary, employees",
-  "Travel and accommodation",
+  "Travel",
   "Travel, extended - applicant",
   "Conferences",
   "Publication costs",
-  "Communication and outreach",
+  "Communication / outreach",
   "Equipment",
   "Operating expenses",
   "Consumables",
@@ -235,17 +235,17 @@ make_default_categories &lt;- function() {
     name = c(
       "Uncategorized",
       "Salary, clinician",
-      "Salary for technicians",
-      "Salary Ph.D. students",
-      "Tuition fees for Ph.D. students",
-      "Salary for postdocs",
-      "Salary for research year (RY)",
+      "Salary, technicians",
+      "Salary, Ph.D. students",
+      "Ph.D., tuition fees",
+      "Salary, postdocs",
+      "Salary, research year",
       "Salary, employees",
-      "Travel and accommodation",
+      "Travel",
       "Travel, extended - applicant",
       "Conferences",
       "Publication costs",
-      "Communication and outreach",
+      "Communication / outreach",
       "Equipment",
       "Operating expenses",
       "Consumables",
@@ -637,7 +637,7 @@ make_default_templates &lt;- function() {
   tibble(
     id = 1L:3L,
     name = c("Custom", "Research Year", "PhD student"),
-    category = c("", "Salary for research year (RY)", "Salary Ph.D. students"),
+    category = c("", "Salary, research year", "Salary, Ph.D. students"),
     center = rep("", 3),
     mode = c("function", "function", "function"),
     unit = c("month", "month", "month"),
@@ -5044,6 +5044,7 @@ server &lt;- function(input, output, session) {
         `Post name`        = post_name,
         Category           = category,
         Note               = note,
+        needs_amendment    = needs_amendment,
         application_status = if_else(is.na(application_status), "Applied for", application_status)
       )
 
@@ -5055,7 +5056,7 @@ server &lt;- function(input, output, session) {
         mutate(group_id = -seq_len(n()))   # negative ids distinct from real post ids
 
       id_to_group &lt;- post_meta %&gt;%
-        select(id, Site, Category, application_status) %&gt;%
+        select(id, Site, Category, needs_amendment, application_status) %&gt;%
         left_join(group_map, by = c("Site", "Category"))
 
       post_period &lt;- post_period %&gt;%
@@ -5076,6 +5077,7 @@ server &lt;- function(input, output, session) {
             if (any(s == "Applied for")) "Applied for"
             else s[which.min(match(s, status_order))]
           },
+          needs_amendment = any(needs_amendment, na.rm = TRUE),
           .groups = "drop"
         ) %&gt;%
         transmute(
@@ -5085,6 +5087,7 @@ server &lt;- function(input, output, session) {
                                        Category, "(Uncategorised)"),
           Category           = Category,
           Note               = NA_character_,
+          needs_amendment    = needs_amendment,
           application_status = application_status
         )
     }
@@ -5140,7 +5143,7 @@ server &lt;- function(input, output, session) {
     df &lt;- df %&gt;%
       select(id, `Post name`, Category, Note,
              all_of(period_cols), all_of(fte_cols), all_of(status_cols),
-             Site, application_status)
+             Site, needs_amendment, application_status)
 
     num_cols &lt;- c(period_cols, fte_cols, status_cols)
 
@@ -5182,7 +5185,7 @@ server &lt;- function(input, output, session) {
           tibble(id = NA_integer_, `Post name` = "Site total",
                  Category = NA_character_, Note = NA_character_),
           st_row,
-          tibble(Site = site, application_status = NA_character_)
+          tibble(Site = site, needs_amendment = NA, application_status = NA_character_)
         )
         st_row &lt;- st_row[, names(df), drop = FALSE]
         rows_list   &lt;- c(rows_list, list(st_row))
@@ -5203,14 +5206,14 @@ server &lt;- function(input, output, session) {
       tibble(id = NA_integer_, `Post name` = "Grand total",
              Category = NA_character_, Note = NA_character_),
       grand_row,
-      tibble(Site = NA_character_, application_status = NA_character_)
+      tibble(Site = NA_character_, needs_amendment = NA, application_status = NA_character_)
     )
     grand_row &lt;- grand_row[, names(df), drop = FALSE]
     rows_list &lt;- c(rows_list, list(grand_row))
 
     result &lt;- bind_rows(rows_list)
 
-    # Drop Site; insert spacer columns; keep application_status as last (hidden) column
+    # Drop Site; insert spacer columns; keep needs_amendment and application_status as last hidden columns
     spacer1 &lt;- "  "   # between period cols and FTE cols
     spacer2 &lt;- " "    # between FTE cols and status cols
     result &lt;- result %&gt;%
@@ -5224,6 +5227,7 @@ server &lt;- function(input, output, session) {
              all_of(fte_cols),
              !!spacer2,
              all_of(status_cols),
+             needs_amendment,
              application_status)
 
     list(
@@ -5731,13 +5735,14 @@ server &lt;- function(input, output, session) {
     # 0-based column indices
     idx_id         &lt;- 0L
     idx_note       &lt;- 3L
+    idx_needs_amend &lt;- which(col_names == "needs_amendment") - 1L   # needs_amendment (second-to-last)
     idx_app_status &lt;- n_cols - 1L          # application_status is always last
     idx_fte_cols   &lt;- which(col_names %in% fte_cols) - 1L
     idx_spacer1    &lt;- which(col_names == "  ") - 1L   # between periods and FTE
     idx_spacer2    &lt;- which(col_names == " ")  - 1L   # between FTE and status
 
     # Always hidden
-    always_hidden &lt;- c(idx_id, idx_note, idx_app_status)
+    always_hidden &lt;- c(idx_id, idx_note, idx_needs_amend, idx_app_status)
     # FTE cols (+ their spacer) hidden when checkbox unchecked
     fte_hidden    &lt;- if (!show_fte) c(idx_spacer1, idx_fte_cols) else integer(0)
     # Category col hidden when "Category" is in squash
@@ -5765,10 +5770,11 @@ server &lt;- function(input, output, session) {
         columnDefs  = col_defs,
         rowCallback = JS(
           "function(row, data, index) {",
-          # data[0]=id, data[1]=Post name, data[last]=application_status
+          # data[0]=id, data[1]=Post name, data[data.length-2]=needs_amendment, data[data.length-1]=application_status
           "  var id         = data[0];",
           "  var pname      = typeof data[1] === 'string' ? data[1] : '';",
-          "  var appStatus  = data[data.length - 1];",
+          "  var needsAmend = data[data.length - 2];  // second to last",
+          "  var appStatus  = data[data.length - 1];  // last",
           "  var isStructural = (id === null || id === '' || id === 'NA' ||",
           "                      typeof id !== 'number');",
           "  if (pname === 'Grand total') {",
@@ -5786,6 +5792,10 @@ server &lt;- function(input, output, session) {
           "    $(row).css({'line-height':'8px'});",
           "    $('td', row).text('');",
           "    $(row).addClass('summary-structural');",
+          "  } else if (needsAmend === true || needsAmend === 1 || needsAmend === 'true') {",
+          "    // Amendment needed: add badge-like indicator on the left of Post name",
+          "    var $pnameCell = $('td:eq(0)', row);",
+          "    $pnameCell.html('&lt;span class=\"amend-badge\"&gt;⚠&lt;/span&gt; ' + $pnameCell.html());",
           "  } else if (appStatus &amp;&amp; appStatus !== 'Applied for') {",
           "    // Non-applied-for post row: italic + muted colour",
           "    $(row).css({'font-style':'italic','color':'#888888'});",
