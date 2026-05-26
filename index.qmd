@@ -822,9 +822,53 @@ resolve_post_values <- function(post_row, salaries_lookup = data.frame(), inflat
   } else if (mode == "function") {
     function_expr_safe <- if (is.null(post_row$function_expr) || !nzchar(trimws(post_row$function_expr))) "rep(0, n)" else post_row$function_expr
     n_values <- if (unit == "year") n_years else n_months
+    # Apply inflation wrapping if flag is set
+    if (isTRUE(post_row$apply_inflation) && nzchar(trimws(function_expr_safe))) {
+      function_expr_safe <- paste0("apply_inflation(", function_expr_safe, ")")
+    }
     values <- safe_eval_expr(function_expr_safe, fte = fte, n = n_values, extra_env = extra_env)
     if (!is.numeric(values)) {
       stop("Amount formula must resolve to numeric values.", call. = FALSE)
+    }
+  } else if (mode == "salary") {
+    # Salary mode: generate formula on-the-fly from salary_selected and salary_field_selected
+    sal_selected <- post_row$salary_selected
+    sal_field <- post_row$salary_field_selected
+    
+    if (!nzchar(sal_selected) || !nzchar(sal_field)) {
+      stop("Salary post missing salary_selected or salary_field_selected.", call. = FALSE)
+    }
+    
+    # Look up the salary identifier from the salaries table
+    salary_identifier <- NA_character_
+    if (!is.null(salaries_tbl) && nrow(salaries_tbl) > 0) {
+      sal_row <- salaries_tbl %>% filter(name == sal_selected, !is_deleted)
+      if (nrow(sal_row) > 0) {
+        salary_identifier <- sal_row$identifier[1]
+      }
+    }
+    
+    if (is.na(salary_identifier) || !nzchar(salary_identifier)) {
+      stop(paste0("Salary '", sal_selected, "' not found or has been deleted."), call. = FALSE)
+    }
+    
+    # Generate formula: salary_identifier$field
+    generated_formula <- paste0(salary_identifier, "$", sal_field)
+    
+    # Apply multiply by FTE if checked
+    if (isTRUE(post_row$multiply_by_fte)) {
+      generated_formula <- paste0(generated_formula, " * FTE")
+    }
+    
+    # Apply inflation wrapping if flag is set
+    if (isTRUE(post_row$apply_inflation)) {
+      generated_formula <- paste0("apply_inflation(", generated_formula, ")")
+    }
+    
+    n_values <- if (unit == "year") n_years else n_months
+    values <- safe_eval_expr(generated_formula, fte = fte, n = n_values, extra_env = extra_env)
+    if (!is.numeric(values)) {
+      stop("Salary formula must resolve to numeric values.", call. = FALSE)
     }
   } else if (mode == "sum") {
     # Sum mode: use only the selected posts (sites and statuses are already baked into selection)
@@ -4981,7 +5025,7 @@ server <- function(input, output, session) {
         `Post name`        = post_name,
         Category           = category,
         Note               = note,
-        Period             = if_else(!is.na(salary_selected) & nzchar(salary_selected), paste0(format(start_date, "%Y-%m-%d"), ":", format(end_date, "%Y-%m-%d")), NA_character_),
+        Period             = if_else(value_mode == "salary" | !is.na(fte) | grepl("salary", post_name, ignore.case = TRUE) | grepl("salary", category, ignore.case = TRUE), paste0(format(start_date, "%Y-%m-%d"), ":", format(end_date, "%Y-%m-%d")), NA_character_),
         needs_amendment    = needs_amendment,
         application_status = if_else(is.na(application_status), "Applied for", application_status)
       )
@@ -5969,35 +6013,9 @@ server <- function(input, output, session) {
     updateDateRangeInput(session, "post_date_range", start = row$start_date[[1]], end = row$end_date[[1]])
     updateNumericInput(session, "fte", value = row$fte[[1]])
     
-    # Determine selected mode:
-    # If salary fields are populated, verify the formula matches what would be generated
-    # If it matches, show salary mode. If it doesn't match (manually edited), show formula mode.
-    selected_mode <- "function"  # default
-    if (nzchar(rv$salary_selected_draft) && nzchar(rv$salary_field_selected_draft)) {
-      # Salary fields are populated - check if formula matches what we'd generate
-      salary_row <- rv$salaries %>% filter(name == rv$salary_selected_draft, !is_deleted)
-      if (nrow(salary_row) > 0) {
-        salary_identifier <- salary_row$identifier[1]
-        base_formula <- paste0(salary_identifier, "$", rv$salary_field_selected_draft)
-        # Check if formula matches either the base formula or base formula with FTE multiplier
-        actual_formula <- as.character(row$function_expr[[1]])
-        expected_with_fte <- paste0(base_formula, " * FTE")
-        if (identical(actual_formula, base_formula) || identical(actual_formula, expected_with_fte)) {
-          # Formula matches the salary mode pattern, show salary UI
-          selected_mode <- "salary"
-        }
-      }
-    }
-    # If not salary mode, check for other modes
-    if (selected_mode != "salary") {
-      if (identical(row$value_mode[[1]], "variable")) {
-        selected_mode <- "variable"
-      } else if (identical(row$value_mode[[1]], "sum")) {
-        selected_mode <- "sum"
-      } else {
-        selected_mode <- "function"
-      }
-    }
+    # Determine selected mode: use value_mode directly from the stored post
+    selected_mode <- as.character(row$value_mode[[1]] %||% "variable")
+    
     updateSelectInput(session, "value_mode", selected = selected_mode)
     updateRadioButtons(session, "value_unit", selected = row$value_unit[[1]])
     updateRadioButtons(session, "numeric_input_mode", selected = rv$numeric_input_mode_draft)
@@ -6274,45 +6292,27 @@ server <- function(input, output, session) {
       }
     }
 
-    # For salary mode, generate the function_expr from salary selections
+    # For salary mode, keep salary_selected/salary_field_selected; formula generated at calculation time
     sal_selected <- if (is_editing) rv$salary_selected_draft else (input$salary_selected %||% "")
     sal_field <- if (is_editing) rv$salary_field_selected_draft else (input$salary_field_selected %||% "")
     sal_multiply_by_fte <- if (is_editing) rv$multiply_by_fte_draft else (input$multiply_by_fte %||% TRUE)
     apply_inflation_flag <- if (is_editing) rv$apply_inflation_draft else (input$apply_inflation %||% FALSE)
     
-    # Handle salary mode: convert to function mode with generated formula
+    # Handle salary mode: keep value_mode as "salary", don't store formula
     actual_value_mode <- val_mode
-    generated_function_expr <- ""
     if (val_mode == "salary") {
       if (!nzchar(sal_selected) || !nzchar(sal_field)) {
         rv$form_error_text <- "Salary mode requires both salary name and field to be selected."
         return()
       }
-      # Look up the identifier for the selected salary name
+      # Validate that the selected salary exists
       salary_row <- rv$salaries %>% filter(name == sal_selected, !is_deleted)
       if (!nrow(salary_row)) {
         rv$form_error_text <- "Selected salary not found or has been deleted."
         return()
       }
-      salary_identifier <- salary_row$identifier[1]
-      # Generate formula using the salary identifier and field
-      generated_function_expr <- paste0(salary_identifier, "$", sal_field)
-      # If multiply by FTE is checked, add FTE multiplier
-      if (isTRUE(sal_multiply_by_fte)) {
-        generated_function_expr <- paste0(generated_function_expr, " * FTE")
-      }
-      # If apply_inflation is checked, wrap with apply_inflation()
-      if (isTRUE(apply_inflation_flag)) {
-        generated_function_expr <- paste0("apply_inflation(", generated_function_expr, ")")
-      }
-      # For validation and storage, convert to function mode with the generated formula
-      actual_value_mode <- "function"
-    } else if (val_mode == "function") {
-      # For function mode, wrap with apply_inflation() if checkbox is checked
-      user_function_expr <- if (is_editing) rv$function_expr_draft else input$function_expr
-      if (isTRUE(apply_inflation_flag) && !is.null(user_function_expr) && nzchar(user_function_expr)) {
-        generated_function_expr <- paste0("apply_inflation(", user_function_expr, ")")
-      }
+      # Keep value_mode as "salary" (not converting to "function")
+      actual_value_mode <- "salary"
     }
 
     new_row <- tibble(
@@ -6326,7 +6326,9 @@ server <- function(input, output, session) {
       value_mode = actual_value_mode,
       value_unit = if (is_editing) rv$value_unit_draft else input$value_unit,
       constant_expr = rv$constant_expr_draft,
-      function_expr = if (nzchar(generated_function_expr)) generated_function_expr else ifelse(is.null(input$function_expr) || !nzchar(input$function_expr), rv$function_expr_draft, input$function_expr),
+      # For salary mode, keep function_expr empty (formula generated at calculation time)
+      # For function mode, keep user's formula as-is (inflation handled at calculation time)
+      function_expr = if (actual_value_mode == "salary") "" else (if (is.null(input$function_expr) || !nzchar(input$function_expr)) rv$function_expr_draft else input$function_expr),
       value_vector = list(vec),
       salary_selected = sal_selected,
       salary_field_selected = sal_field,
@@ -7282,7 +7284,9 @@ server <- function(input, output, session) {
       !is.na(pnames) & nzchar(pnames) &
       pnames != "Site total" & pnames != "Grand total"
     row_app_status <- d$application_status
-    result <- d %>% select(-id, -needs_amendment, -application_status)
+    result <- d %>% 
+      select(-id, -needs_amendment, -application_status) %>%
+      rename(`Employment period` = Period)
     attr(result, "row_application_status") <- row_app_status
     attr(result, "row_is_site_header")     <- row_is_site_header
     attr(result, "summary_status_cols")    <- summ$status_cols
