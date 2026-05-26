@@ -4952,6 +4952,7 @@ server <- function(input, output, session) {
         `Post name`        = post_name,
         Category           = category,
         Note               = note,
+        Period             = if_else(!is.na(salary_selected) & nzchar(salary_selected), paste0(format(start_date, "%Y-%m-%d"), ":", format(end_date, "%Y-%m-%d")), NA_character_),
         needs_amendment    = needs_amendment,
         application_status = if_else(is.na(application_status), "Applied for", application_status)
       )
@@ -4964,7 +4965,7 @@ server <- function(input, output, session) {
         mutate(group_id = -seq_len(n()))   # negative ids distinct from real post ids
 
       id_to_group <- post_meta %>%
-        select(id, Site, Category, needs_amendment, application_status) %>%
+        select(id, Site, Category, Period, needs_amendment, application_status) %>%
         left_join(group_map, by = c("Site", "Category"))
 
       post_period <- post_period %>%
@@ -4985,6 +4986,7 @@ server <- function(input, output, session) {
             if (any(s == "Applied for")) "Applied for"
             else s[which.min(match(s, status_order))]
           },
+          Period = paste(unique(na.omit(Period)), collapse = "; "),
           needs_amendment = any(needs_amendment, na.rm = TRUE),
           .groups = "drop"
         ) %>%
@@ -4995,6 +4997,7 @@ server <- function(input, output, session) {
                                        Category, "(Uncategorised)"),
           Category           = Category,
           Note               = NA_character_,
+          Period             = Period,
           needs_amendment    = needs_amendment,
           application_status = application_status
         )
@@ -5049,13 +5052,17 @@ server <- function(input, output, session) {
 
     # Keep Site + application_status temporarily for row-building loop
     df <- df %>%
-      select(id, `Post name`, Category, Note,
+      select(id, `Post name`, Category, Note, Period,
              all_of(period_cols), all_of(fte_cols), all_of(status_cols),
              Site, needs_amendment, application_status)
 
     num_cols <- c(period_cols, fte_cols, status_cols)
+    
+    # Replace 0 values with NA in all numeric columns
+    df <- df %>%
+      mutate(across(all_of(num_cols), ~ if_else(. == 0, NA_real_, .)))
 
-    sites_vec   <- unique(df$Site)
+    sites_vec   <- sort(unique(df$Site))  # Sort sites alphabetically
     rows_list   <- list()
     site_totals <- list()
 
@@ -5069,7 +5076,7 @@ server <- function(input, output, session) {
 
     first_site <- TRUE
     for (site in sites_vec) {
-      site_posts <- df %>% filter(Site == site)
+      site_posts <- df %>% filter(Site == site) %>% arrange(`Post name`)  # Sort by post name
 
       if (!collapse_site) {
         # Blank row before very first site header
@@ -5091,7 +5098,7 @@ server <- function(input, output, session) {
           summarise(across(all_of(num_cols), ~ sum(.x, na.rm = TRUE)))
         st_row <- bind_cols(
           tibble(id = NA_integer_, `Post name` = "Site total",
-                 Category = NA_character_, Note = NA_character_),
+                 Category = NA_character_, Note = NA_character_, Period = NA_character_),
           st_row,
           tibble(Site = site, needs_amendment = NA, application_status = NA_character_)
         )
@@ -5112,7 +5119,7 @@ server <- function(input, output, session) {
       summarise(across(all_of(num_cols), ~ sum(.x, na.rm = TRUE)))
     grand_row <- bind_cols(
       tibble(id = NA_integer_, `Post name` = "Grand total",
-             Category = NA_character_, Note = NA_character_),
+             Category = NA_character_, Note = NA_character_, Period = NA_character_),
       grand_row,
       tibble(Site = NA_character_, needs_amendment = NA, application_status = NA_character_)
     )
@@ -5129,7 +5136,7 @@ server <- function(input, output, session) {
       mutate(!!spacer1 := NA_character_, !!spacer2 := NA_character_)
 
     result <- result %>%
-      select(id, `Post name`, Category, Note,
+      select(id, `Post name`, Category, Note, Period,
              all_of(period_cols),
              !!spacer1,
              all_of(fte_cols),
@@ -5643,6 +5650,7 @@ server <- function(input, output, session) {
     # 0-based column indices
     idx_id         <- 0L
     idx_note       <- 3L
+    idx_period     <- which(col_names == "Period") - 1L   # Period (hidden from in-app view)
     idx_needs_amend <- which(col_names == "needs_amendment") - 1L   # needs_amendment (second-to-last)
     idx_app_status <- n_cols - 1L          # application_status is always last
     idx_fte_cols   <- which(col_names %in% fte_cols) - 1L
@@ -5650,7 +5658,7 @@ server <- function(input, output, session) {
     idx_spacer2    <- which(col_names == " ")  - 1L   # between FTE and status
 
     # Always hidden
-    always_hidden <- c(idx_id, idx_note, idx_needs_amend, idx_app_status)
+    always_hidden <- c(idx_id, idx_note, idx_period, idx_needs_amend, idx_app_status)
     # FTE cols (+ their spacer) hidden when checkbox unchecked
     fte_hidden    <- if (!show_fte) c(idx_spacer1, idx_fte_cols) else integer(0)
     # Category col hidden when "Category" is in squash
@@ -7245,7 +7253,7 @@ server <- function(input, output, session) {
       !is.na(pnames) & nzchar(pnames) &
       pnames != "Site total" & pnames != "Grand total"
     row_app_status <- d$application_status
-    result <- d %>% select(-id, -application_status)
+    result <- d %>% select(-id, -needs_amendment, -application_status)
     attr(result, "row_application_status") <- row_app_status
     attr(result, "row_is_site_header")     <- row_is_site_header
     attr(result, "summary_status_cols")    <- summ$status_cols
